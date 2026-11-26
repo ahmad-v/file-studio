@@ -2,12 +2,21 @@
 use localwright_core::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "inspect",
         label: "Inspect",
         hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
+    },
+    Operation {
+        id: "hex-preview",
+        label: "Hex preview",
+        hint: "Enter offset,length in bytes (decimal offset or 0x hex offset). Default 0,256. Maximum 1,024 bytes. Optional JSON output.",
     },
     Operation {
         id: "verify",
@@ -106,6 +115,72 @@ fn inspect(p: &Path, j: &Job, expected_size: Option<u64>) -> Result<Value> {
         json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"sha512":format!("{:x}",sha512.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
     )
 }
+fn hex_preview(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
+    let (offset, length) = if parameter.trim().is_empty() {
+        (0, 256)
+    } else {
+        let (offset, length) = parameter
+            .split_once(',')
+            .ok_or_else(|| Error::input("Expected offset,length"))?;
+        let offset = offset.trim();
+        let start = if let Some(hex) = offset
+            .strip_prefix("0x")
+            .or_else(|| offset.strip_prefix("0X"))
+        {
+            u64::from_str_radix(hex, 16)
+        } else {
+            offset.parse()
+        }
+        .map_err(|_| Error::input("Invalid byte offset"))?;
+        let length = length
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|length| (1..=1024).contains(length))
+            .ok_or_else(|| Error::input("Byte length must be from 1 to 1,024"))?;
+        (start, length)
+    };
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() {
+        return Err(Error::input("Expected a regular non-symlink file"));
+    }
+    let mut file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file()
+        || opened.len() != before.len()
+        || opened.modified()? != before.modified()?
+    {
+        return Err(Error::input("File changed before preview"));
+    }
+    if offset > opened.len() {
+        return Err(Error::input("Byte offset is past the end of the file"));
+    }
+    job.check()?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0; length.min((opened.len() - offset).try_into().unwrap_or(usize::MAX))];
+    file.read_exact(&mut bytes)?;
+    let after = file.metadata()?;
+    if after.len() != opened.len() || after.modified()? != opened.modified()? {
+        return Err(Error::input("File changed during preview"));
+    }
+    job.check()?;
+    let rows = bytes
+        .chunks(16)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let hex = chunk.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
+            let ascii = chunk.iter().map(|&byte| match byte {
+                b' '..=b'~' => char::from(byte),
+                _ => '.',
+            }).collect::<String>();
+            json!({"offset_hex":format!("{:016x}", offset + (i * 16) as u64), "hex": hex, "ascii": ascii})
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"schema_version":1, "file_bytes":opened.len(), "bytes_displayed":bytes.len(), "rows":rows}),
+    )
+}
+
 fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
     let (algorithm, expected) = parameter
         .split_once('=')
@@ -348,6 +423,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     j.check()?;
     let value = match r.operation.as_str() {
         "inspect" => inspect(&r.input, &j, None)?,
+        "hex-preview" => hex_preview(&r.input, &r.parameter, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
         "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
@@ -401,6 +477,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
                 .into()
+        } else if r.operation == "hex-preview" {
+            "The report contains raw file bytes. Review it before sharing.".into()
         } else if r.operation == "zip-test" {
             "Entry data integrity only. The report does not establish authenticity or extraction safety.".into()
         } else if r.operation == "zip-list" {
@@ -487,6 +565,37 @@ mod tests {
         let report = duplicate_candidates(root.path(), &Job::new()).unwrap();
         assert_eq!(report["groups"].as_array().unwrap().len(), 1);
         assert_eq!(report["groups"][0]["paths"], json!(["first", "second"]));
+    }
+
+    #[test]
+    fn hex_preview_reads_only_the_requested_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("sample.bin");
+        let output = dir.path().join("preview.json");
+        fs::write(&input, b"skip\x00ABC\x80").unwrap();
+        let request = |parameter: &str| Request {
+            operation: "hex-preview".into(),
+            input: input.clone(),
+            output: output.clone(),
+            parameter: parameter.into(),
+            ..Request::default()
+        };
+        assert!(handle(request("10,3"), Job::new()).is_err());
+        assert!(handle(request("0,1025"), Job::new()).is_err());
+        assert!(!output.exists());
+        handle(request("0x4,10"), Job::new()).unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(report["file_bytes"], 9);
+        assert_eq!(report["bytes_displayed"], 5);
+        assert_eq!(
+            report["rows"][0],
+            json!({
+                "offset_hex": "0000000000000004",
+                "hex": "00 41 42 43 80",
+                "ascii": ".ABC."
+            })
+        );
+        assert!(handle(request("0,1"), Job::new()).is_err());
     }
 
     #[test]

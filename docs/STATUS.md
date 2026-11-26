@@ -6,6 +6,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 |---|---|---|
 | duplicates | Read-only duplicate candidate groups | Linux fixture-tested |
 | directory-usage | Logical directory size report | Linux fixture-tested |
+| hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset, SHA-256/SHA-512/BLAKE3; JSON | Linux fixture-tested |
 | verify | SHA-256, SHA-512 or BLAKE3 against a supplied checksum; JSON on match | Linux fixture-tested |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |

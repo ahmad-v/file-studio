@@ -4,6 +4,7 @@ Nothing is verified on a native target. The machine-readable registry is a devel
 
 | Operation | Route | Evidence status |
 |---|---|---|
+| hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset, SHA-256/BLAKE3; JSON | implemented-unverified |
 | scan | Bounded directory inventory; JSON/CSV | implemented-unverified |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |

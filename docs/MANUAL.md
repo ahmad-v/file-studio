@@ -20,3 +20,5 @@ Limitations: Signature identification is a limited prefix test, not exhaustive o
 No output overwrite is allowed. No accounts, ads, telemetry or runtime downloads are intended. Do not use this unverified snapshot with valuable or hostile input. Citation and donations are voluntary.
 
 Use `zip-test` to verify stored and Deflate entry data without extraction. It accepts archives up to 32 MiB and 4,096 entries, with a 32 MiB expansion limit per entry and 128 MiB per archive. Successful checks confirm decode and internal checksums. Extraction safety and authenticity require separate checks.
+
+Use `hex-preview` with an optional `offset,length` parameter. The default is 256 bytes from offset zero. The maximum is 1,024 bytes. Prefix the offset with `0x` to enter hexadecimal. The report shows printable ASCII beside the hex values and may contain sensitive bytes.
