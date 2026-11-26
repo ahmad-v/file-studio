@@ -24,3 +24,5 @@ Use `zip-test` to verify stored and Deflate entry data without extraction. It ac
 Use `hex-preview` with an optional `offset,length` parameter. The default is 256 bytes from offset zero. The maximum is 1,024 bytes. Prefix the offset with `0x` to enter hexadecimal. The report shows printable ASCII beside the hex values and may contain sensitive bytes.
 
 Use `zip-create` with one regular file up to 16 MiB and a new `.zip` path. Leave the parameter blank to use the input filename, or enter a portable ASCII filename for the entry. This route preserves file bytes and uses a single flat entry. Ownership, original timestamps and extended attributes are omitted.
+
+To extract one file, first use `zip-list` and read its one-based entry number. Pass that number to `zip-extract-entry` and choose a new output file. Unsafe entry paths, symlinks, nonregular entries, CRC errors, files over 32 MiB expanded and output collisions are rejected.

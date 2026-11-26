@@ -19,6 +19,13 @@
       "fixture_status": "pending compilation"
     },
     {
+      "operation": "zip-extract-entry",
+      "description": "Extract one numbered regular ZIP entry to a new chosen path",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 fixtures and independent ZIP input passed"
+    },
+    {
       "operation": "zip-create",
       "description": "One regular file as a Deflate ZIP with a portable entry name",
       "status": "implemented-unverified",

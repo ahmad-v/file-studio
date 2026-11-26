@@ -34,6 +34,11 @@ pub const OPERATIONS: &[Operation] = &[
         hint: "Read stored or deflated entries and verify their checksums without extracting. Optional new JSON output.",
     },
     Operation {
+        id: "zip-extract-entry",
+        label: "Extract one ZIP entry",
+        hint: "Use the entry number shown by List ZIP contents. Extract one regular file to a new output path.",
+    },
+    Operation {
         id: "zip-create",
         label: "Create ZIP from a file",
         hint: "Compress one regular file to a new ZIP. Optionally enter a portable filename for the archive entry.",
@@ -237,45 +242,96 @@ fn test_zip(p: &Path, job: &Job) -> Result<Value> {
     const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
     let mut archive = open_zip(p, job)?;
     let mut total = 0u64;
-    let mut buffer = [0u8; 32 * 1024];
     for index in 0..archive.len() {
         job.check()?;
         let mut member = archive.by_index(index).map_err(|error| {
             Error::input(format!("Cannot open ZIP entry {}: {error}", index + 1))
         })?;
-        let size = member.size();
-        if size > MAX_ENTRY_BYTES || size > MAX_UNCOMPRESSED_BYTES - total {
+        if member.size() > MAX_ENTRY_BYTES || member.size() > MAX_UNCOMPRESSED_BYTES - total {
             return Err(Error::new(ErrorKind::Limit, "ZIP expansion limit exceeded"));
         }
-        let mut actual = 0;
-        loop {
-            job.check()?;
-            let count = member.read(&mut buffer).map_err(|error| {
-                Error::input(format!(
-                    "ZIP entry {} failed integrity checking: {error}",
-                    index + 1
-                ))
-            })?;
-            if count == 0 {
-                break;
-            }
-            actual += count as u64;
-            if actual > size {
-                return Err(Error::input(format!(
-                    "ZIP entry {} expands beyond its declared size",
-                    index + 1
-                )));
-            }
-        }
-        if actual != size {
-            return Err(Error::input(format!(
-                "ZIP entry {} size mismatch",
-                index + 1
-            )));
-        }
-        total += actual;
+        let size = member.size();
+        stream_zip_entry(&mut member, size, std::io::sink(), index + 1, job)?;
+        total += size;
     }
     Ok(json!({"schema_version": 1, "entries_checked": archive.len(), "uncompressed_bytes": total}))
+}
+
+fn stream_zip_entry(
+    mut reader: impl Read,
+    size: u64,
+    mut output: impl Write,
+    number: usize,
+    job: &Job,
+) -> Result<()> {
+    let mut total = 0;
+    let mut buffer = [0u8; 32 * 1024];
+    loop {
+        job.check()?;
+        let count = reader.read(&mut buffer).map_err(|error| {
+            Error::input(format!(
+                "ZIP entry {number} failed integrity checking: {error}"
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > size {
+            return Err(Error::input(format!(
+                "ZIP entry {number} expands beyond its declared size"
+            )));
+        }
+        output.write_all(&buffer[..count])?;
+    }
+    if total != size {
+        return Err(Error::input(format!("ZIP entry {number} size mismatch")));
+    }
+    Ok(())
+}
+
+fn extract_zip_entry(input: &Path, output: &Path, parameter: &str, job: &Job) -> Result<Value> {
+    const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+    let number = parameter
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
+        .ok_or_else(|| Error::input("Enter a positive ZIP entry number"))?;
+    let mut archive = open_zip(input, job)?;
+    let mut member = archive
+        .by_index(number - 1)
+        .map_err(|error| Error::input(format!("Cannot open ZIP entry {number}: {error}")))?;
+    let name = member
+        .name()
+        .map_err(|error| Error::input(format!("Invalid ZIP entry name: {error}")))?;
+    if member.is_dir()
+        || member.is_symlink()
+        || member
+            .unix_mode()
+            .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000))
+    {
+        return Err(Error::input("Choose a regular ZIP file entry"));
+    }
+    if member.enclosed_name().is_none()
+        || name
+            .split(['/', '\\'])
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        || name.contains([':', '\0'])
+    {
+        return Err(Error::input("ZIP entry has an unsafe name"));
+    }
+    let size = member.size();
+    if size > MAX_ENTRY_BYTES {
+        return Err(Error::new(ErrorKind::Limit, "ZIP expansion limit exceeded"));
+    }
+    // The member name is reported only. Creation uses the user-selected path.
+    let report =
+        json!({"schema_version":1,"entry_number":number,"entry":name,"uncompressed_bytes":size});
+    write_new(output, |file| {
+        stream_zip_entry(&mut member, size, file, number, job)
+    })?;
+    Ok(report)
 }
 
 fn create_zip(input: &Path, output: &Path, parameter: &str, job: &Job) -> Result<Value> {
@@ -358,6 +414,7 @@ fn list_zip(p: &Path, job: &Job) -> Result<Value> {
             ));
         }
         entries.push(json!({
+            "number": index + 1,
             "name": name,
             "directory": member.is_dir(),
             "symlink": member.is_symlink(),
@@ -492,12 +549,22 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "verify" => verify(&r.input, &r.parameter, &j)?,
         "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
-        "zip-create" => {
-            let value = create_zip(&r.input, &r.output, &r.parameter, &j)?;
+        "zip-create" | "zip-extract-entry" => {
+            let (value, warning) = if r.operation == "zip-create" {
+                (
+                    create_zip(&r.input, &r.output, &r.parameter, &j)?,
+                    "ZIP creation preserves file contents. The archive does not carry source ownership, original timestamps or extended attributes.",
+                )
+            } else {
+                (
+                    extract_zip_entry(&r.input, &r.output, &r.parameter, &j)?,
+                    "Extraction preserves entry bytes and uses the chosen output name. Review untrusted content before opening it.",
+                )
+            };
             return Ok(Outcome {
                 preview: serde_json::to_string_pretty(&value)?,
                 written: Some(r.output),
-                warnings: vec!["ZIP creation preserves file contents. The archive does not carry source ownership, original timestamps or extended attributes.".into()],
+                warnings: vec![warning.into()],
                 ..Outcome::default()
             });
         }
@@ -670,6 +737,38 @@ mod tests {
             })
         );
         assert!(handle(request("0,1"), Job::new()).is_err());
+    }
+
+    #[test]
+    fn extracts_only_a_selected_safe_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.zip");
+        let output = dir.path().join("chosen.bin");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("nested/safe.bin", options).unwrap();
+        archive.write_all(b"safe").unwrap();
+        archive.start_file("../escape.bin", options).unwrap();
+        archive.write_all(b"unsafe").unwrap();
+        archive
+            .add_symlink("link", "nested/safe.bin", options)
+            .unwrap();
+        archive.finish().unwrap();
+        let request = |parameter: &str| Request {
+            operation: "zip-extract-entry".into(),
+            input: input.clone(),
+            output: output.clone(),
+            parameter: parameter.into(),
+            ..Request::default()
+        };
+        for invalid in ["0", "2", "3", "4"] {
+            assert!(handle(request(invalid), Job::new()).is_err());
+            assert!(!output.exists());
+        }
+        handle(request("1"), Job::new()).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"safe");
+        assert!(handle(request("1"), Job::new()).is_err());
+        assert!(!dir.path().join("nested").exists());
     }
 
     #[test]
