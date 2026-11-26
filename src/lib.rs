@@ -1,18 +1,18 @@
 #![forbid(unsafe_code)]
 use localwright_core::*;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::{fs, io::Read, path::Path};
 pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "inspect",
         label: "Inspect",
-        hint: "Read a regular file and compute SHA-256 and BLAKE3. Optional new JSON output.",
+        hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
     },
     Operation {
         id: "verify",
         label: "Verify checksum",
-        hint: "Enter sha256=HEX or blake3=HEX using 64 hex digits. Optional new JSON output on match.",
+        hint: "Enter sha256=HEX or blake3=HEX (64 digits), or sha512=HEX (128 digits). Optional new JSON output on match.",
     },
     Operation {
         id: "scan",
@@ -48,6 +48,7 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
         return Err(Error::input("Not regular file"));
     }
     let mut sha = Sha256::new();
+    let mut sha512 = Sha512::new();
     let mut b3 = blake3::Hasher::new();
     let mut buf = [0u8; 65536];
     let mut total = 0u64;
@@ -66,6 +67,7 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
             return Err(Error::input("File grew during inspection"));
         }
         sha.update(&buf[..n]);
+        sha512.update(&buf[..n]);
         b3.update(&buf[..n]);
         j.progress(total, before.len());
     }
@@ -78,20 +80,24 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
         return Err(Error::input("File changed during inspection"));
     }
     Ok(
-        json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
+        json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"sha512":format!("{:x}",sha512.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
     )
 }
 fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
     let (algorithm, expected) = parameter
         .split_once('=')
-        .ok_or_else(|| Error::input("Expected sha256=HEX or blake3=HEX"))?;
+        .ok_or_else(|| Error::input("Expected sha256=HEX, sha512=HEX or blake3=HEX"))?;
     let algorithm = algorithm.trim().to_ascii_lowercase();
     let expected = expected.trim();
-    if !matches!(algorithm.as_str(), "sha256" | "blake3") {
-        return Err(Error::input("Choose sha256 or blake3"));
-    }
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(Error::input("Expected a 64-digit hexadecimal checksum"));
+    let digits = match algorithm.as_str() {
+        "sha256" | "blake3" => 64,
+        "sha512" => 128,
+        _ => return Err(Error::input("Choose sha256, sha512 or blake3")),
+    };
+    if expected.len() != digits || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::input(format!(
+            "Expected a {digits}-digit hexadecimal checksum"
+        )));
     }
 
     let inspection = inspect(path, job)?;
@@ -229,6 +235,13 @@ mod tests {
             v["blake3"],
             "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
         );
+        let sha512 = concat!(
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+            "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(v["sha512"], sha512);
+        let result = verify(&p, &format!("sha512={sha512}"), &Job::new()).unwrap();
+        assert_eq!(result["matched"], true);
         assert_eq!(scan(d.path(), &Job::new()).unwrap().len(), 1);
         let output = d.path().join("report.csv");
         handle(

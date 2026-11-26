@@ -6,14 +6,14 @@
   "development_routes": [
     {
       "operation": "inspect",
-      "description": "Signature subset, SHA-256/BLAKE3; JSON",
+      "description": "Signature subset, SHA-256/SHA-512/BLAKE3; JSON",
       "status": "implemented-unverified",
       "targets": [],
       "fixture_status": "not run"
     },
     {
       "operation": "verify",
-      "description": "Compare a file to a supplied SHA-256 or BLAKE3 checksum",
+      "description": "Compare a file to a supplied SHA-256, SHA-512 or BLAKE3 checksum",
       "status": "implemented-unverified",
       "targets": ["x86_64-unknown-linux-gnu"],
       "fixture_status": "Linux fixture passed"
