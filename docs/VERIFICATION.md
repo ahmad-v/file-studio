@@ -1,10 +1,7 @@
 # Verification evidence
 
-Static checks performed on source artifacts only:
+The integration run used Rust 1.88.0 on Linux x86_64 with Localwright pinned to the revision in `Cargo.lock`. Formatting, locked all-target checking, default and headless tests, strict Clippy, and CLI help passed.
 
-- file-studio: specification exact; TOML/JSON/YAML/CFF syntax, Python AST, XML/SVG/WiX well-formedness passed (not schema validation).
-- file-studio: exact sibling dependency paths/version and 15 unique packaging rows passed.
-- File fixture: independent Python SHA-256 known vector passed.
-- file-studio: packaging architecture helper accepted synthetic ARM64 PE header and rejected x64 mismatch (not an executable test).
+Signature tests and the scan fixture passed. Python hashlib independently confirmed the SHA-256 in the CLI JSON output.
 
-No Rust compilation or runtime tests executed. Cargo/rustc not installed; DNS lookup of static.rust-lang.org and index.crates.io failed. CI, package builds, signing, SBOM, license and security review remain pending.
+The GitHub workflow defines five platform checks. Device tests and installer verification remain open.
