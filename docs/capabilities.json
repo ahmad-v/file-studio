@@ -5,6 +5,13 @@
   "verified_capabilities": [],
   "development_routes": [
     {
+      "operation": "duplicates",
+      "description": "Read-only duplicate candidate groups",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "pending compilation"
+    },
+    {
       "operation": "directory-usage",
       "description": "Logical directory size report",
       "status": "implemented-unverified",

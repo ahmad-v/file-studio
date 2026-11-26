@@ -20,6 +20,11 @@ pub const OPERATIONS: &[Operation] = &[
         hint: "Inspect ZIP directory entries without expanding them. Optional new JSON output.",
     },
     Operation {
+        id: "duplicates",
+        label: "Find duplicate candidates",
+        hint: "Group same-size files with matching BLAKE3 checksums. Optional new JSON output.",
+    },
+    Operation {
         id: "directory-usage",
         label: "Directory usage",
         hint: "Total regular-file sizes by top-level directory. Optional new JSON output.",
@@ -47,10 +52,13 @@ fn identify(b: &[u8]) -> &'static str {
         "unknown"
     }
 }
-fn inspect(p: &Path, j: &Job) -> Result<Value> {
+fn inspect(p: &Path, j: &Job, expected_size: Option<u64>) -> Result<Value> {
     let before = fs::symlink_metadata(p)?;
     if !before.is_file() || before.file_type().is_symlink() {
         return Err(Error::input("Expected regular non-symlink file"));
+    }
+    if expected_size.is_some_and(|size| before.len() != size) {
+        return Err(Error::input("A candidate changed since the directory scan"));
     }
     let mut f = fs::File::open(p)?;
     let opened = f.metadata()?;
@@ -110,7 +118,7 @@ fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
         )));
     }
 
-    let inspection = inspect(path, job)?;
+    let inspection = inspect(path, job, None)?;
     let actual = inspection[algorithm.as_str()]
         .as_str()
         .ok_or_else(|| Error::input("Checksum unavailable"))?;
@@ -236,6 +244,43 @@ fn directory_usage(root: &Path, job: &Job) -> Result<Value> {
     }))
 }
 
+fn duplicate_candidates(root: &Path, job: &Job) -> Result<Value> {
+    let files = scan(root, job)?;
+    let mut sizes = std::collections::BTreeMap::<u64, Vec<&str>>::new();
+    for file in &files {
+        job.check()?;
+        let size = file["bytes"].as_u64().expect("scan reports a byte count");
+        let path = file["path"].as_str().expect("scan reports a path");
+        sizes.entry(size).or_default().push(path);
+    }
+    let mut read_budget = 1024 * 1024 * 1024u64;
+    let mut groups = Vec::new();
+    for (size, paths) in sizes.into_iter().filter(|(_, paths)| paths.len() > 1) {
+        let bytes = size
+            .checked_mul(paths.len() as u64)
+            .and_then(|bytes| read_budget.checked_sub(bytes))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Limit,
+                    "Duplicate scan exceeds 1 GiB of candidate files",
+                )
+            })?;
+        read_budget = bytes;
+        let mut hashes = std::collections::BTreeMap::<String, Vec<&str>>::new();
+        for path in paths {
+            job.check()?;
+            let input = root.join(path);
+            let entry = inspect(&input, job, Some(size))?;
+            let digest = entry["blake3"].as_str().expect("inspection reports a hash");
+            hashes.entry(digest.into()).or_default().push(path);
+        }
+        groups.extend(hashes.into_iter().filter(|(_, paths)| paths.len() > 1).map(
+            |(digest, paths)| json!({"bytes_per_file": size, "blake3": digest, "paths": paths}),
+        ));
+    }
+    Ok(json!({"schema_version": 1, "regular_files_scanned": files.len(), "groups": groups}))
+}
+
 fn safe_cell(s: &str) -> String {
     if s.trim_start().starts_with(['=', '+', '-', '@']) || s.starts_with(['\t', '\r', '\n']) {
         format!("'{s}")
@@ -246,8 +291,9 @@ fn safe_cell(s: &str) -> String {
 pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     j.check()?;
     let value = match r.operation.as_str() {
-        "inspect" => inspect(&r.input, &j)?,
+        "inspect" => inspect(&r.input, &j, None)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
+        "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
         "zip-list" => list_zip(&r.input, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
@@ -292,6 +338,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         written,
         warnings: vec![if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
+        } else if r.operation == "duplicates" {
+            "Candidates share a size and BLAKE3 checksum. Review files before making any changes."
+                .into()
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
                 .into()
@@ -311,7 +360,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("é.txt");
         fs::write(&p, b"abc").unwrap();
-        let v = inspect(&p, &Job::new()).unwrap();
+        let v = inspect(&p, &Job::new(), None).unwrap();
         assert_eq!(
             v["sha256"],
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -368,6 +417,17 @@ mod tests {
         assert_eq!(usage["root_bytes"], 3);
         assert_eq!(usage["total_bytes"], 8);
         assert_eq!(usage["directories"]["group"], 5);
+    }
+
+    #[test]
+    fn reports_matching_files_without_grouping_different_same_size_files() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, data) in [("first", b"abc"), ("second", b"abc"), ("different", b"xyz")] {
+            fs::write(root.path().join(name), data).unwrap();
+        }
+        let report = duplicate_candidates(root.path(), &Job::new()).unwrap();
+        assert_eq!(report["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(report["groups"][0]["paths"], json!(["first", "second"]));
     }
 
     #[test]
