@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod catalog;
 mod png_metadata;
 use localwright_core::*;
 use serde_json::{json, Value};
@@ -63,6 +64,11 @@ pub const OPERATIONS: &[Operation] = &[
         id: "directory-usage",
         label: "Directory usage",
         hint: "Total regular-file sizes by top-level directory. Optional new JSON output.",
+    },
+    Operation {
+        id: "catalog-search",
+        label: "Search a saved file inventory",
+        hint: "Input a scan JSON and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
     Operation {
         id: "scan",
@@ -591,6 +597,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }
         "zip-list" => list_zip(&r.input, &j)?,
         "zip-test" => test_zip(&r.input, &j)?,
+        "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
     };
@@ -639,6 +646,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
                 .into()
+        } else if r.operation == "catalog-search" {
+            "Results describe the saved scan. Files may have moved or changed. The source drive is not accessed.".into()
         } else if r.operation == "png-metadata" {
             "Reports PNG chunk types and counts without decoding image pixels or metadata values."
                 .into()
@@ -761,6 +770,46 @@ mod tests {
             })
         );
         assert!(handle(request("0,1"), Job::new()).is_err());
+    }
+
+    #[test]
+    fn searches_saved_inventory_after_source_files_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("volume");
+        let inventory = dir.path().join("inventory.json");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Café Notes.txt"), b"abc").unwrap();
+        fs::write(source.join("Other.txt"), b"abcdef").unwrap();
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: source.clone(),
+                output: inventory.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        fs::remove_file(source.join("Café Notes.txt")).unwrap();
+        fs::remove_file(source.join("Other.txt")).unwrap();
+        fs::remove_dir(source).unwrap();
+        let result = handle(
+            Request {
+                operation: "catalog-search".into(),
+                input: inventory,
+                parameter: "CAFÉ".into(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&result.preview).unwrap();
+        assert_eq!(report["catalogued_files"], 2);
+        assert_eq!(report["matched_files"], 1);
+        assert_eq!(
+            report["files"][0],
+            json!({"path":"Café Notes.txt","bytes":3})
+        );
     }
 
     #[test]

@@ -84,6 +84,13 @@
       "fixture_status": "Linux fixture passed"
     },
     {
+      "operation": "catalog-search",
+      "description": "Search a saved version 1 inventory by path text",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux CLI searched a saved inventory after its source directory moved"
+    },
+    {
       "operation": "scan",
       "description": "Bounded directory inventory; JSON/CSV",
       "status": "implemented-unverified",

@@ -28,3 +28,5 @@ Use `zip-create` with one regular file up to 16 MiB and a new `.zip` path. Leave
 To extract one file, first use `zip-list` and read its one-based entry number. Pass that number to `zip-extract-entry` and choose a new output file. Unsafe entry paths, symlinks, nonregular entries, CRC errors, files over 32 MiB expanded and output collisions are rejected.
 
 Use `png-metadata` to count chunk types and identify removable metadata without reading tag values. Use `png-strip-metadata` with a new `.png` output to omit `tEXt`, `zTXt`, `iTXt`, and `eXIf` chunks. The report shows counts before and after. Image data and chunks such as ICC profiles remain. Treat the output as a selective metadata cleanup and review its contents before sharing.
+
+To search while a source drive is unavailable, save a scan as JSON. Later use `catalog-search` with the saved inventory as Input and a path fragment as Parameter. Search matches Unicode-lowercased text and does not access the paths. A new JSON output is optional. Results reflect the original scan and may contain sensitive filenames.

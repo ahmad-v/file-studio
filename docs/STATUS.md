@@ -14,6 +14,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 | zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |
 | zip-list | ZIP directory listing; JSON | Linux fixture-tested |
+| catalog-search | Search a saved version 1 inventory by path text | Linux unit fixture and CLI-tested |
 | scan | Bounded directory inventory; JSON/CSV | Linux fixture-tested |
 
 ## Known gaps
