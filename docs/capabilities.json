@@ -5,6 +5,15 @@
   "verified_capabilities": [],
   "development_routes": [
     {
+      "operation": "zip-list",
+      "description": "Read-only ZIP directory listing",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x64 smoke passed"
+    },
+    {
       "operation": "inspect",
       "description": "Signature subset, SHA-256/SHA-512/BLAKE3; JSON",
       "status": "implemented-unverified",

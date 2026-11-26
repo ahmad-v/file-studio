@@ -4,6 +4,7 @@ Development source only. Launch the GUI after compiling. Choose an operation, en
 
 - `inspect`: Signature subset, SHA-256/SHA-512/BLAKE3; JSON.
 - `verify` checks the input against a SHA-256, SHA-512, or BLAKE3 checksum. Enter `sha256=HEX` or `blake3=HEX` in the operation parameter, using 64 hexadecimal digits, or `sha512=HEX` using 128 digits. Obtain the checksum from a trusted source. Leave the output blank for a preview or give it a new `.json` path for a report. A mismatch reports an error and creates no output.
+- `zip-list`: List ZIP entries and declared sizes. Optional new JSON output. Member data is never expanded.
 - `scan`: Bounded directory inventory; JSON/CSV.
 
 To verify the bundled sample from the command line:
