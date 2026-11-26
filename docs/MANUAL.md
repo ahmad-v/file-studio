@@ -1,6 +1,6 @@
 # Offline manual | File Studio
 
-Development source only. Launch the GUI after compiling. Choose an operation, enter local input path and a new output path where needed, set the parameter as described under the operation selector, then Run. Status and errors are shown below. Cancel requests cooperative cancellation. The draft editor accepts transcript or plain text. Theme selection changes client colors only. Paths are manually typed in this increment; native dialogs and full accessibility remain pending.
+Development source only. Launch the GUI after compiling. Choose an operation, enter local input path and a new output path where needed, set the parameter as described under the operation selector, then Run. Status and errors are shown below. Cancel requests cooperative cancellation. The draft editor accepts transcript or plain text. Choose a theme to change workbench colors and control borders. UI scale adjusts the controls from 80% to 300% for the current session. Paths are manually typed in this increment; native dialogs and full accessibility remain pending.
 
 - `inspect`: Signature subset, SHA-256/BLAKE3; JSON.
 - `verify` checks the input against a SHA-256 or BLAKE3 checksum. Enter `sha256=HEX` or `blake3=HEX` in the operation parameter, using 64 hexadecimal digits from a trusted source. Leave the output blank for a preview or give it a new `.json` path for a report. A mismatch reports an error and creates no output.
