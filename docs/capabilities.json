@@ -12,6 +12,13 @@
       "fixture_status": "not run"
     },
     {
+      "operation": "verify",
+      "description": "Compare a file to a supplied SHA-256 or BLAKE3 checksum",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux fixture passed"
+    },
+    {
       "operation": "scan",
       "description": "Bounded directory inventory; JSON/CSV",
       "status": "implemented-unverified",
