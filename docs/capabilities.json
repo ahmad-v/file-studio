@@ -5,6 +5,13 @@
   "verified_capabilities": [],
   "development_routes": [
     {
+      "operation": "directory-usage",
+      "description": "Logical directory size report",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "pending compilation"
+    },
+    {
       "operation": "zip-list",
       "description": "Read-only ZIP directory listing",
       "status": "implemented-unverified",

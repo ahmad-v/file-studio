@@ -20,6 +20,11 @@ pub const OPERATIONS: &[Operation] = &[
         hint: "Inspect ZIP directory entries without expanding them. Optional new JSON output.",
     },
     Operation {
+        id: "directory-usage",
+        label: "Directory usage",
+        hint: "Total regular-file sizes by top-level directory. Optional new JSON output.",
+    },
+    Operation {
         id: "scan",
         label: "Scan",
         hint: "Read-only recursive directory inventory. Output new JSON or CSV; symbolic links are skipped.",
@@ -201,6 +206,36 @@ fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
     rows.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(rows)
 }
+fn directory_usage(root: &Path, job: &Job) -> Result<Value> {
+    let mut total = 0u64;
+    let mut root_bytes = 0u64;
+    let mut directories = std::collections::BTreeMap::<String, u64>::new();
+    let files = scan(root, job)?;
+    for file in &files {
+        job.check()?;
+        let bytes = file["bytes"].as_u64().expect("scan reports a byte count");
+        total = total
+            .checked_add(bytes)
+            .ok_or_else(|| Error::new(ErrorKind::Limit, "Directory byte total overflow"))?;
+        let relative = Path::new(file["path"].as_str().expect("scan reports a path"));
+        if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let top = parent.components().next().expect("nonempty parent");
+            *directories
+                .entry(top.as_os_str().to_string_lossy().into_owned())
+                .or_default() += bytes;
+        } else {
+            root_bytes += bytes;
+        }
+    }
+    Ok(json!({
+        "schema_version": 1,
+        "regular_files": files.len(),
+        "total_bytes": total,
+        "root_bytes": root_bytes,
+        "directories": directories,
+    }))
+}
+
 fn safe_cell(s: &str) -> String {
     if s.trim_start().starts_with(['=', '+', '-', '@']) || s.starts_with(['\t', '\r', '\n']) {
         format!("'{s}")
@@ -213,6 +248,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     let value = match r.operation.as_str() {
         "inspect" => inspect(&r.input, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
+        "directory-usage" => directory_usage(&r.input, &j)?,
         "zip-list" => list_zip(&r.input, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
@@ -256,6 +292,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         written,
         warnings: vec![if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
+        } else if r.operation == "directory-usage" {
+            "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
+                .into()
         } else if r.operation == "zip-list" {
             "ZIP metadata only. Reported sizes are declarations and entry contents were not tested or extracted.".into()
         } else {
@@ -317,6 +356,18 @@ mod tests {
         assert_eq!(listing["entries"][0]["name"], "../outside.txt");
         assert_eq!(listing["entries"][0]["declared_bytes"], 3);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn directory_usage_counts_nested_files_under_their_top_level() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("group/nested")).unwrap();
+        fs::write(root.path().join("root.txt"), b"123").unwrap();
+        fs::write(root.path().join("group/nested/file.txt"), b"12345").unwrap();
+        let usage = directory_usage(root.path(), &Job::new()).unwrap();
+        assert_eq!(usage["root_bytes"], 3);
+        assert_eq!(usage["total_bytes"], 8);
+        assert_eq!(usage["directories"]["group"], 5);
     }
 
     #[test]

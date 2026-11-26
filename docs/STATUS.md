@@ -4,6 +4,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 
 | Operation | Scope | Status |
 |---|---|---|
+| directory-usage | Logical directory size report | implemented-unverified |
 | inspect | Signature subset, SHA-256/SHA-512/BLAKE3; JSON | Linux fixture-tested |
 | verify | SHA-256, SHA-512 or BLAKE3 against a supplied checksum; JSON on match | Linux fixture-tested |
 | zip-list | ZIP directory listing; JSON | Linux fixture-tested |
