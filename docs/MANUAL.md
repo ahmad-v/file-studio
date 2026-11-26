@@ -30,3 +30,8 @@ To extract one file, first use `zip-list` and read its one-based entry number. P
 Use `png-metadata` to count chunk types and identify removable metadata without reading tag values. Use `png-strip-metadata` with a new `.png` output to omit `tEXt`, `zTXt`, `iTXt`, and `eXIf` chunks. The report shows counts before and after. Image data and chunks such as ICC profiles remain. Treat the output as a selective metadata cleanup and review its contents before sharing.
 
 To search while a source drive is unavailable, save a scan as JSON. Later use `catalog-search` with the saved inventory as Input and a path fragment as Parameter. Search matches Unicode-lowercased text and does not access the paths. A new JSON output is optional. Results reflect the original scan and may contain sensitive filenames.
+
+## Additional operations
+
+- `catalog-compare`. Open the earlier catalog JSON and enter the later catalog path. The report lists added, removed, and size-changed paths. A same-size match can still have different contents.
+- `file-times`. Open a regular file. Times are reported in Unix epoch milliseconds. Unavailable timestamps appear as null.

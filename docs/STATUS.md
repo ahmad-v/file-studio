@@ -4,6 +4,8 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 
 | Operation | Scope | Status |
 |---|---|---|
+| catalog-compare | Compare paths and sizes in saved inventories | Linux fixture-tested |
+| file-times | Read creation, modification and access timestamps | Linux fixture-tested |
 | duplicates | Read-only duplicate candidate groups | Linux fixture-tested |
 | directory-usage | Logical directory size report | Linux fixture-tested |
 | png-metadata / png-strip-metadata | Inspect PNG chunks and remove text or EXIF metadata from a copy | Linux fixture and independent pixel-verified CLI |

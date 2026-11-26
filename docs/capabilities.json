@@ -5,6 +5,20 @@
   "verified_capabilities": [],
   "development_routes": [
     {
+      "operation": "catalog-compare",
+      "description": "Compare paths and sizes in saved inventories",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux integration fixture passed"
+    },
+    {
+      "operation": "file-times",
+      "description": "Read creation, modification and access timestamps",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux integration fixture passed"
+    },
+    {
       "operation": "duplicates",
       "description": "Read-only duplicate candidate groups",
       "status": "implemented-unverified",

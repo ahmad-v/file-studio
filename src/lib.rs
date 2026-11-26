@@ -66,6 +66,16 @@ pub const OPERATIONS: &[Operation] = &[
         hint: "Total regular-file sizes by top-level directory. Optional new JSON output.",
     },
     Operation {
+        id: "catalog-compare",
+        label: "Compare saved inventories",
+        hint: "Input the earlier scan JSON and enter the newer scan path. Optional new JSON report.",
+    },
+    Operation {
+        id: "file-times",
+        label: "Inspect file timestamps",
+        hint: "Read available creation, modification and access times for a regular file. Optional JSON report.",
+    },
+    Operation {
         id: "catalog-search",
         label: "Search a saved file inventory",
         hint: "Input a scan JSON and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
@@ -93,6 +103,32 @@ fn identify(b: &[u8]) -> &'static str {
         "unknown"
     }
 }
+fn file_times(path: &Path) -> Result<Value> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(Error::input("Choose a regular, non-symlink file"));
+    }
+    let timestamp = |value: std::io::Result<SystemTime>| {
+        value.ok().and_then(|time| {
+            let milliseconds = match time.duration_since(UNIX_EPOCH) {
+                Ok(delta) => i128::try_from(delta.as_millis()).ok()?,
+                Err(error) => {
+                    -i128::try_from(error.duration().as_nanos().div_ceil(1_000_000)).ok()?
+                }
+            };
+            i64::try_from(milliseconds).ok()
+        })
+    };
+    Ok(json!({
+        "schema_version": 1,
+        "bytes": metadata.len(),
+        "created_unix_ms": timestamp(metadata.created()),
+        "modified_unix_ms": timestamp(metadata.modified()),
+        "accessed_unix_ms": timestamp(metadata.accessed()),
+    }))
+}
+
 fn inspect(p: &Path, j: &Job, expected_size: Option<u64>) -> Result<Value> {
     let before = fs::symlink_metadata(p)?;
     if !before.is_file() || before.file_type().is_symlink() {
@@ -597,6 +633,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }
         "zip-list" => list_zip(&r.input, &j)?,
         "zip-test" => test_zip(&r.input, &j)?,
+        "file-times" => file_times(&r.input)?,
+        "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
         "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
@@ -646,6 +684,10 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
                 .into()
+        } else if r.operation == "catalog-compare" {
+            "Inventory comparison uses saved paths and sizes. Same-size files may have different contents.".into()
+        } else if r.operation == "file-times" {
+            "Timestamps are milliseconds since the Unix epoch. Unavailable timestamps appear as null.".into()
         } else if r.operation == "catalog-search" {
             "Results describe the saved scan. Files may have moved or changed. The source drive is not accessed.".into()
         } else if r.operation == "png-metadata" {
