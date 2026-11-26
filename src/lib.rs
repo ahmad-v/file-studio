@@ -20,6 +20,11 @@ pub const OPERATIONS: &[Operation] = &[
         hint: "Inspect ZIP directory entries without expanding them. Optional new JSON output.",
     },
     Operation {
+        id: "zip-test",
+        label: "Test ZIP integrity",
+        hint: "Read stored or deflated entries and verify their checksums without extracting. Optional new JSON output.",
+    },
+    Operation {
         id: "duplicates",
         label: "Find duplicate candidates",
         hint: "Group same-size files with matching BLAKE3 checksums. Optional new JSON output.",
@@ -135,15 +140,66 @@ fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
         "bytes": inspection["bytes"],
     }))
 }
-fn list_zip(p: &Path, job: &Job) -> Result<Value> {
+fn open_zip(p: &Path, job: &Job) -> Result<zip::ZipArchive<std::io::Cursor<Vec<u8>>>> {
     const MAX_ENTRIES: usize = 4096;
     let bytes = read_bounded(p, 32 * 1024 * 1024)?;
     job.check()?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|error| Error::input(format!("Invalid ZIP: {error}")))?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::new(ErrorKind::Limit, "ZIP entry limit exceeded"));
     }
+    Ok(archive)
+}
+
+fn test_zip(p: &Path, job: &Job) -> Result<Value> {
+    const MAX_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+    let mut archive = open_zip(p, job)?;
+    let mut total = 0u64;
+    let mut buffer = [0u8; 32 * 1024];
+    for index in 0..archive.len() {
+        job.check()?;
+        let mut member = archive.by_index(index).map_err(|error| {
+            Error::input(format!("Cannot open ZIP entry {}: {error}", index + 1))
+        })?;
+        let size = member.size();
+        if size > MAX_ENTRY_BYTES || size > MAX_UNCOMPRESSED_BYTES - total {
+            return Err(Error::new(ErrorKind::Limit, "ZIP expansion limit exceeded"));
+        }
+        let mut actual = 0;
+        loop {
+            job.check()?;
+            let count = member.read(&mut buffer).map_err(|error| {
+                Error::input(format!(
+                    "ZIP entry {} failed integrity checking: {error}",
+                    index + 1
+                ))
+            })?;
+            if count == 0 {
+                break;
+            }
+            actual += count as u64;
+            if actual > size {
+                return Err(Error::input(format!(
+                    "ZIP entry {} expands beyond its declared size",
+                    index + 1
+                )));
+            }
+        }
+        if actual != size {
+            return Err(Error::input(format!(
+                "ZIP entry {} size mismatch",
+                index + 1
+            )));
+        }
+        total += actual;
+    }
+    Ok(json!({"schema_version": 1, "entries_checked": archive.len(), "uncompressed_bytes": total}))
+}
+
+fn list_zip(p: &Path, job: &Job) -> Result<Value> {
+    let mut archive = open_zip(p, job)?;
     let mut names_bytes = 0usize;
     let mut entries = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
@@ -296,6 +352,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
         "zip-list" => list_zip(&r.input, &j)?,
+        "zip-test" => test_zip(&r.input, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
     };
@@ -344,6 +401,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
                 .into()
+        } else if r.operation == "zip-test" {
+            "Entry data integrity only. The report does not establish authenticity or extraction safety.".into()
         } else if r.operation == "zip-list" {
             "ZIP metadata only. Reported sizes are declarations and entry contents were not tested or extracted.".into()
         } else {
@@ -428,6 +487,57 @@ mod tests {
         let report = duplicate_candidates(root.path(), &Job::new()).unwrap();
         assert_eq!(report["groups"].as_array().unwrap().len(), 1);
         assert_eq!(report["groups"][0]["paths"], json!(["first", "second"]));
+    }
+
+    #[test]
+    fn zip_integrity_reports_corruption_without_writing_output() {
+        use std::io::Write as _;
+        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("example.zip");
+        let output = dir.path().join("test.json");
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let payload = b"this is the unique uncompressed fixture payload";
+        zip.start_file(
+            "data.txt",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(payload).unwrap();
+        zip.start_file(
+            "other.txt",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"compressed file").unwrap();
+        let mut bytes = zip.finish().unwrap().into_inner();
+        fs::write(&input, &bytes).unwrap();
+        let request = Request {
+            operation: "zip-test".into(),
+            input: input.clone(),
+            output: output.clone(),
+            ..Request::default()
+        };
+        handle(request.clone(), Job::new()).unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(report["entries_checked"], 2);
+        assert_eq!(
+            report["uncompressed_bytes"],
+            payload.len() + b"compressed file".len()
+        );
+
+        fs::remove_file(&output).unwrap();
+        let offset = bytes
+            .windows(payload.len())
+            .position(|window| window == payload)
+            .unwrap();
+        bytes[offset] ^= 1;
+        fs::write(input, bytes).unwrap();
+        assert!(handle(request, Job::new())
+            .unwrap_err()
+            .message
+            .contains("integrity"));
+        assert!(!output.exists());
     }
 
     #[test]

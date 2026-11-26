@@ -19,6 +19,13 @@
       "fixture_status": "pending compilation"
     },
     {
+      "operation": "zip-test",
+      "description": "Stored and Deflate ZIP entry checks without extraction",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 valid and corrupt fixtures passed"
+    },
+    {
       "operation": "zip-list",
       "description": "Read-only ZIP directory listing",
       "status": "implemented-unverified",
