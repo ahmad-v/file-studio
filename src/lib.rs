@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
 pub const OPERATIONS: &[Operation] = &[
@@ -32,6 +32,11 @@ pub const OPERATIONS: &[Operation] = &[
         id: "zip-test",
         label: "Test ZIP integrity",
         hint: "Read stored or deflated entries and verify their checksums without extracting. Optional new JSON output.",
+    },
+    Operation {
+        id: "zip-create",
+        label: "Create ZIP from a file",
+        hint: "Compress one regular file to a new ZIP. Optionally enter a portable filename for the archive entry.",
     },
     Operation {
         id: "duplicates",
@@ -273,6 +278,66 @@ fn test_zip(p: &Path, job: &Job) -> Result<Value> {
     Ok(json!({"schema_version": 1, "entries_checked": archive.len(), "uncompressed_bytes": total}))
 }
 
+fn create_zip(input: &Path, output: &Path, parameter: &str, job: &Job) -> Result<Value> {
+    const MAX_SOURCE: u64 = 16 * 1024 * 1024;
+    if !output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return Err(Error::input("Choose .zip output"));
+    }
+    let name = if parameter.is_empty() {
+        input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::input("Enter a portable ZIP entry filename"))?
+    } else {
+        parameter
+    };
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    if name.is_empty()
+        || name.len() > 128
+        || name.starts_with(['.', ' '])
+        || name.ends_with(['.', ' '])
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._- ".contains(&byte))
+        || reserved
+    {
+        return Err(Error::input(
+            "ZIP entry must be a portable ASCII filename without directories",
+        ));
+    }
+    let content = read_bounded(input, MAX_SOURCE)?;
+    job.check()?;
+    write_new(output, |file| {
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive
+            .start_file(name, options)
+            .map_err(|error| Error::input(error.to_string()))?;
+        for chunk in content.chunks(64 * 1024) {
+            job.check()?;
+            archive.write_all(chunk)?;
+        }
+        archive
+            .finish()
+            .map_err(|error| Error::input(error.to_string()))?;
+        job.check()
+    })?;
+    Ok(json!({"schema_version":1,"entry":name,"uncompressed_bytes":content.len()}))
+}
+
 fn list_zip(p: &Path, job: &Job) -> Result<Value> {
     let mut archive = open_zip(p, job)?;
     let mut names_bytes = 0usize;
@@ -427,6 +492,15 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "verify" => verify(&r.input, &r.parameter, &j)?,
         "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
+        "zip-create" => {
+            let value = create_zip(&r.input, &r.output, &r.parameter, &j)?;
+            return Ok(Outcome {
+                preview: serde_json::to_string_pretty(&value)?,
+                written: Some(r.output),
+                warnings: vec!["ZIP creation preserves file contents. The archive does not carry source ownership, original timestamps or extended attributes.".into()],
+                ..Outcome::default()
+            });
+        }
         "zip-list" => list_zip(&r.input, &j)?,
         "zip-test" => test_zip(&r.input, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
@@ -596,6 +670,35 @@ mod tests {
             })
         );
         assert!(handle(request("0,1"), Job::new()).is_err());
+    }
+
+    #[test]
+    fn creates_a_single_file_zip_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.txt");
+        let output = dir.path().join("archive.zip");
+        fs::write(&input, b"hello archive").unwrap();
+        let request = |parameter: &str| Request {
+            operation: "zip-create".into(),
+            input: input.clone(),
+            output: output.clone(),
+            parameter: parameter.into(),
+            ..Request::default()
+        };
+        for invalid in ["../file", "a/b", "NUL.txt", "x.", "x ", "com1.txt"] {
+            assert!(handle(request(invalid), Job::new()).is_err());
+            assert!(!output.exists());
+        }
+        let result = handle(request(""), Job::new()).unwrap();
+        assert_eq!(result.written.as_deref(), Some(output.as_path()));
+        assert!(handle(request("second.txt"), Job::new()).is_err());
+        let mut archive = open_zip(&output, &Job::new()).unwrap();
+        assert_eq!(archive.len(), 1);
+        let mut entry = archive.by_name("source.txt").unwrap();
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"hello archive");
+        assert_eq!(fs::read(&input).unwrap(), contents);
     }
 
     #[test]

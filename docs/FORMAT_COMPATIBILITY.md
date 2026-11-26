@@ -7,6 +7,7 @@ Nothing is verified on a native target. The machine-readable registry is a devel
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset, SHA-256/BLAKE3; JSON | implemented-unverified |
 | scan | Bounded directory inventory; JSON/CSV | implemented-unverified |
+| zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |
 
 See section 04-07 and 10 of the master specification for complete targets.
