@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=File Studio
+Exec=file-studio
+Icon=org.localwright.FileStudio
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "project": "file-studio",
+  "version": "0.1.0-alpha.1",
+  "verified_capabilities": [],
+  "development_routes": [
+    {
+      "operation": "inspect",
+      "description": "Signature subset, SHA-256/BLAKE3; JSON",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "not run"
+    },
+    {
+      "operation": "scan",
+      "description": "Bounded directory inventory; JSON/CSV",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "not run"
+    }
+  ]
+}

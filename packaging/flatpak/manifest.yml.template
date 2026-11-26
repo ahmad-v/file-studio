@@ -1,0 +1,24 @@
+# Template only. Pin reviewed runtime/SDK commits, Rust extension and cargo vendor sources before build.
+app-id: org.localwright.FileStudio
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: file-studio
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: file-studio
+    buildsystem: simple
+    build-commands:
+      - cargo build --offline --locked --release
+      - install -Dm755 target/release/file-studio /app/bin/file-studio
+      - install -Dm644 packaging/linux/org.localwright.FileStudio.desktop /app/share/applications/org.localwright.FileStudio.desktop
+      - install -Dm644 packaging/linux/org.localwright.FileStudio.metainfo.xml /app/share/metainfo/org.localwright.FileStudio.metainfo.xml
+      - install -Dm644 packaging/linux/org.localwright.FileStudio.svg /app/share/icons/hicolor/scalable/apps/org.localwright.FileStudio.svg
+    sources: [] # Replace with exact source commits and verified vendor manifest; do not enable build network.
