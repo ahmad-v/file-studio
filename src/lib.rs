@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod png_metadata;
 use localwright_core::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
@@ -12,6 +13,16 @@ pub const OPERATIONS: &[Operation] = &[
         id: "inspect",
         label: "Inspect",
         hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
+    },
+    Operation {
+        id: "png-metadata",
+        label: "Inspect PNG metadata",
+        hint: "Count PNG chunk types and identify removable text and EXIF chunks. Optional JSON output.",
+    },
+    Operation {
+        id: "png-strip-metadata",
+        label: "Remove PNG text and EXIF",
+        hint: "Remove PNG text and EXIF chunks from a copy. Choose a new .png output.",
     },
     Operation {
         id: "hex-preview",
@@ -545,6 +556,16 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     j.check()?;
     let value = match r.operation.as_str() {
         "inspect" => inspect(&r.input, &j, None)?,
+        "png-metadata" => png_metadata::process(&r.input, None, &j)?,
+        "png-strip-metadata" => {
+            let report = png_metadata::process(&r.input, Some(&r.output), &j)?;
+            return Ok(Outcome {
+                preview: serde_json::to_string_pretty(&report)?,
+                written: Some(r.output),
+                warnings: vec!["Removed PNG text and EXIF chunks only. Image pixels, color profiles and other chunks remain and may contain sensitive information.".into()],
+                ..Outcome::default()
+            });
+        }
         "hex-preview" => hex_preview(&r.input, &r.parameter, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
         "duplicates" => duplicate_candidates(&r.input, &j)?,
@@ -617,6 +638,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 .into()
         } else if r.operation == "directory-usage" {
             "Logical file sizes only. Hard links are counted per path, and symlinks are skipped."
+                .into()
+        } else if r.operation == "png-metadata" {
+            "Reports PNG chunk types and counts without decoding image pixels or metadata values."
                 .into()
         } else if r.operation == "hex-preview" {
             "The report contains raw file bytes. Review it before sharing.".into()

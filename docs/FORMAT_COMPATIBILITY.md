@@ -4,6 +4,7 @@ Nothing is verified on a native target. The machine-readable registry is a devel
 
 | Operation | Route | Evidence status |
 |---|---|---|
+| png-metadata / png-strip-metadata | PNG chunk inspection and removal of text and EXIF from a copy | Linux fixture-tested |
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset, SHA-256/BLAKE3; JSON | implemented-unverified |
 | scan | Bounded directory inventory; JSON/CSV | implemented-unverified |

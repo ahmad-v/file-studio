@@ -621,6 +621,7 @@ name = "file-studio"
 version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
+ "crc32fast",
  "csv",
  "localwright-core",
  "localwright-ui",
