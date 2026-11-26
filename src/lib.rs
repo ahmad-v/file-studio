@@ -1,18 +1,23 @@
 #![forbid(unsafe_code)]
 use localwright_core::*;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::{fs, io::Read, path::Path};
 pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "inspect",
         label: "Inspect",
-        hint: "Read a regular file and compute SHA-256 and BLAKE3. Optional new JSON output.",
+        hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
     },
     Operation {
         id: "verify",
         label: "Verify checksum",
-        hint: "Enter sha256=HEX or blake3=HEX using 64 hex digits. Optional new JSON output on match.",
+        hint: "Enter sha256=HEX or blake3=HEX (64 digits), or sha512=HEX (128 digits). Optional new JSON output on match.",
+    },
+    Operation {
+        id: "zip-list",
+        label: "List ZIP contents",
+        hint: "Inspect ZIP directory entries without expanding them. Optional new JSON output.",
     },
     Operation {
         id: "scan",
@@ -48,6 +53,7 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
         return Err(Error::input("Not regular file"));
     }
     let mut sha = Sha256::new();
+    let mut sha512 = Sha512::new();
     let mut b3 = blake3::Hasher::new();
     let mut buf = [0u8; 65536];
     let mut total = 0u64;
@@ -66,6 +72,7 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
             return Err(Error::input("File grew during inspection"));
         }
         sha.update(&buf[..n]);
+        sha512.update(&buf[..n]);
         b3.update(&buf[..n]);
         j.progress(total, before.len());
     }
@@ -78,20 +85,24 @@ fn inspect(p: &Path, j: &Job) -> Result<Value> {
         return Err(Error::input("File changed during inspection"));
     }
     Ok(
-        json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
+        json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"sha512":format!("{:x}",sha512.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
     )
 }
 fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
     let (algorithm, expected) = parameter
         .split_once('=')
-        .ok_or_else(|| Error::input("Expected sha256=HEX or blake3=HEX"))?;
+        .ok_or_else(|| Error::input("Expected sha256=HEX, sha512=HEX or blake3=HEX"))?;
     let algorithm = algorithm.trim().to_ascii_lowercase();
     let expected = expected.trim();
-    if !matches!(algorithm.as_str(), "sha256" | "blake3") {
-        return Err(Error::input("Choose sha256 or blake3"));
-    }
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(Error::input("Expected a 64-digit hexadecimal checksum"));
+    let digits = match algorithm.as_str() {
+        "sha256" | "blake3" => 64,
+        "sha512" => 128,
+        _ => return Err(Error::input("Choose sha256, sha512 or blake3")),
+    };
+    if expected.len() != digits || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::input(format!(
+            "Expected a {digits}-digit hexadecimal checksum"
+        )));
     }
 
     let inspection = inspect(path, job)?;
@@ -111,6 +122,44 @@ fn verify(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
         "bytes": inspection["bytes"],
     }))
 }
+fn list_zip(p: &Path, job: &Job) -> Result<Value> {
+    const MAX_ENTRIES: usize = 4096;
+    let bytes = read_bounded(p, 32 * 1024 * 1024)?;
+    job.check()?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|error| Error::input(format!("Invalid ZIP: {error}")))?;
+    if archive.len() > MAX_ENTRIES {
+        return Err(Error::new(ErrorKind::Limit, "ZIP entry limit exceeded"));
+    }
+    let mut names_bytes = 0usize;
+    let mut entries = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        job.check()?;
+        let member = archive
+            .by_index_raw(index)
+            .map_err(|error| Error::input(format!("Invalid ZIP entry: {error}")))?;
+        let name = member
+            .name()
+            .map_err(|error| Error::input(format!("Invalid ZIP entry name: {error}")))?;
+        names_bytes += name.len();
+        if names_bytes > 256 * 1024 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "ZIP entry names exceed the report limit",
+            ));
+        }
+        entries.push(json!({
+            "name": name,
+            "directory": member.is_dir(),
+            "symlink": member.is_symlink(),
+            "encrypted": member.encrypted(),
+            "compressed_bytes": member.compressed_size(),
+            "declared_bytes": member.size(),
+        }));
+    }
+    Ok(json!({"schema_version":1,"entries":entries}))
+}
+
 fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
     let m = fs::symlink_metadata(root)?;
     if !m.is_dir() || m.file_type().is_symlink() {
@@ -164,6 +213,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     let value = match r.operation.as_str() {
         "inspect" => inspect(&r.input, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
+        "zip-list" => list_zip(&r.input, &j)?,
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
     };
@@ -206,6 +256,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         written,
         warnings: vec![if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
+        } else if r.operation == "zip-list" {
+            "ZIP metadata only. Reported sizes are declarations and entry contents were not tested or extracted.".into()
         } else {
             "Signature detection is limited; scan paths may contain sensitive information.".into()
         }],
@@ -229,6 +281,13 @@ mod tests {
             v["blake3"],
             "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
         );
+        let sha512 = concat!(
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+            "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(v["sha512"], sha512);
+        let result = verify(&p, &format!("sha512={sha512}"), &Job::new()).unwrap();
+        assert_eq!(result["matched"], true);
         assert_eq!(scan(d.path(), &Job::new()).unwrap().len(), 1);
         let output = d.path().join("report.csv");
         handle(
@@ -243,6 +302,23 @@ mod tests {
         .unwrap();
         assert!(fs::read_to_string(output).unwrap().contains("é.txt,3"));
     }
+    #[test]
+    fn lists_zip_entries_without_extracting_files() {
+        use std::io::Write as _;
+        let directory = tempfile::tempdir().unwrap();
+        let zip_path = directory.path().join("input.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        writer
+            .start_file("../outside.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"abc").unwrap();
+        writer.finish().unwrap();
+        let listing = list_zip(&zip_path, &Job::new()).unwrap();
+        assert_eq!(listing["entries"][0]["name"], "../outside.txt");
+        assert_eq!(listing["entries"][0]["declared_bytes"], 3);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn signatures() {
         assert_eq!(identify(b"%PDF-1.7"), "application/pdf");
