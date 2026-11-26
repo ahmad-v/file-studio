@@ -3,7 +3,14 @@
 Development source only. Launch the GUI after compiling. Choose an operation, enter local input path and a new output path where needed, set the parameter as described under the operation selector, then Run. Status and errors are shown below. Cancel requests cooperative cancellation. The draft editor accepts transcript or plain text. Theme selection changes client colors only. Paths are manually typed in this increment; native dialogs and full accessibility remain pending.
 
 - `inspect`: Signature subset, SHA-256/BLAKE3; JSON.
+- `verify` checks the input against a SHA-256 or BLAKE3 checksum. Enter `sha256=HEX` or `blake3=HEX` in the operation parameter, using 64 hexadecimal digits from a trusted source. Leave the output blank for a preview or give it a new `.json` path for a report. A mismatch reports an error and creates no output.
 - `scan`: Bounded directory inventory; JSON/CSV.
+
+To verify the bundled sample from the command line:
+
+```sh
+cargo run --locked --no-default-features -- --cli verify tests/fixtures/abc.txt "" sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+```
 
 Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no volume catalogue, duplicate analysis, metadata sanitation, archives, encryption or backup. File metadata comparison cannot detect every concurrent modification or path race. No timestamps in report yet.
 
