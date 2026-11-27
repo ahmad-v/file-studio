@@ -110,6 +110,34 @@
       "status": "implemented-unverified",
       "targets": [],
       "fixture_status": "not run"
+    },
+    {
+      "operation": "manifest-create",
+      "description": "Create versioned SHA-256 manifests for regular files under a directory",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux match, changed-file, missing-file and unsafe-path fixtures passed"
+    },
+    {
+      "operation": "manifest-verify",
+      "description": "Verify a SHA-256 manifest against a chosen directory root",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux match, changed-file, missing-file and unsafe-path fixtures passed"
+    },
+    {
+      "operation": "zip-create-directory",
+      "description": "Create a bounded Deflate ZIP from regular files under a directory",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux directory archive extraction round-trip passed"
+    },
+    {
+      "operation": "zip-extract-all",
+      "description": "Safely extract bounded regular files from ZIP to a new directory",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux round-trip and traversal-rejection fixtures passed"
     }
   ]
 }
