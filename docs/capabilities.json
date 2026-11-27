@@ -5,6 +5,55 @@
   "verified_capabilities": [],
   "development_routes": [
     {
+      "operation": "catalog-compare",
+      "description": "Compare paths and sizes in saved inventories",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux integration fixture passed"
+    },
+    {
+      "operation": "file-times",
+      "description": "Read creation, modification and access timestamps",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux integration fixture passed"
+    },
+    {
+      "operation": "duplicates",
+      "description": "Read-only duplicate candidate groups",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "pending compilation"
+    },
+    {
+      "operation": "directory-usage",
+      "description": "Logical directory size report",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "pending compilation"
+    },
+    {
+      "operation": "zip-extract-entry",
+      "description": "Extract one numbered regular ZIP entry to a new chosen path",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 fixtures and independent ZIP input passed"
+    },
+    {
+      "operation": "zip-create",
+      "description": "One regular file as a Deflate ZIP with a portable entry name",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 fixture and independent Python ZIP verification passed"
+    },
+    {
+      "operation": "zip-test",
+      "description": "Stored and Deflate ZIP entry checks without extraction",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 valid and corrupt fixtures passed"
+    },
+    {
       "operation": "zip-list",
       "description": "Read-only ZIP directory listing",
       "status": "implemented-unverified",
@@ -12,6 +61,27 @@
         "x86_64-unknown-linux-gnu"
       ],
       "fixture_status": "Linux x64 smoke passed"
+    },
+    {
+      "operation": "png-strip-metadata",
+      "description": "Remove PNG text and EXIF chunks from a copy",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux fixture and independent PNG pixel and metadata checks passed"
+    },
+    {
+      "operation": "png-metadata",
+      "description": "Inspect PNG chunk counts",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux fixture and independent PNG pixel and metadata checks passed"
+    },
+    {
+      "operation": "hex-preview",
+      "description": "Bounded file window with hex and printable ASCII",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux x86_64 byte window and export fixture passed"
     },
     {
       "operation": "inspect",
@@ -26,6 +96,13 @@
       "status": "implemented-unverified",
       "targets": ["x86_64-unknown-linux-gnu"],
       "fixture_status": "Linux fixture passed"
+    },
+    {
+      "operation": "catalog-search",
+      "description": "Search a saved version 1 inventory by path text",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Linux CLI searched a saved inventory after its source directory moved"
     },
     {
       "operation": "scan",

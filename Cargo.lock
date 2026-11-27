@@ -621,9 +621,11 @@ name = "file-studio"
 version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
+ "crc32fast",
  "csv",
  "localwright-core",
  "localwright-ui",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1179,8 +1181,8 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "localwright-core"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/ahmad-v/localwright?rev=019bdc79535280d4f1fa723878192849fe8fb5dc#019bdc79535280d4f1fa723878192849fe8fb5dc"
+version = "0.1.0"
+source = "git+https://github.com/ahmad-v/localwright?rev=3091d10892df79b9959f49a073db34cf81c9a15e#3091d10892df79b9959f49a073db34cf81c9a15e"
 dependencies = [
  "serde",
  "serde_json",
@@ -1189,12 +1191,15 @@ dependencies = [
 
 [[package]]
 name = "localwright-ui"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/ahmad-v/localwright?rev=019bdc79535280d4f1fa723878192849fe8fb5dc#019bdc79535280d4f1fa723878192849fe8fb5dc"
+version = "0.1.0"
+source = "git+https://github.com/ahmad-v/localwright?rev=3091d10892df79b9959f49a073db34cf81c9a15e#3091d10892df79b9959f49a073db34cf81c9a15e"
 dependencies = [
  "futures",
  "iced",
  "localwright-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3087,6 +3092,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
+ "flate2",
  "indexmap",
  "memchr",
  "nix",

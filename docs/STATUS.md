@@ -4,13 +4,23 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 
 | Operation | Scope | Status |
 |---|---|---|
+| catalog-compare | Compare paths and sizes in saved inventories | Linux fixture-tested |
+| file-times | Read creation, modification and access timestamps | Linux fixture-tested |
+| duplicates | Read-only duplicate candidate groups | Linux fixture-tested |
+| directory-usage | Logical directory size report | Linux fixture-tested |
+| png-metadata / png-strip-metadata | Inspect PNG chunks and remove text or EXIF metadata from a copy | Linux fixture and independent pixel-verified CLI |
+| hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset, SHA-256/SHA-512/BLAKE3; JSON | Linux fixture-tested |
 | verify | SHA-256, SHA-512 or BLAKE3 against a supplied checksum; JSON on match | Linux fixture-tested |
+| zip-extract-entry | Extract one numbered regular entry to a chosen path | Linux fixture and CLI-tested |
+| zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
+| zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |
 | zip-list | ZIP directory listing; JSON | Linux fixture-tested |
+| catalog-search | Search a saved version 1 inventory by path text | Linux unit fixture and CLI-tested |
 | scan | Bounded directory inventory; JSON/CSV | Linux fixture-tested |
 
 ## Known gaps
 
-Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no volume catalogue, duplicate analysis, metadata sanitation, archive extraction or creation, encryption or backup. File metadata comparison cannot detect every concurrent modification or path race. No timestamps in report yet.
+Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no persistent volume catalogue, metadata sanitation outside the supported PNG chunks, whole-archive extraction or multi-file creation, encryption or backup. File metadata comparison cannot detect every concurrent modification or path race. No timestamps in report yet.
 
 Hosted matrix, device, and packaging verification remain open. See [verification evidence](VERIFICATION.md) and [dependency review](DEPENDENCIES.md).
