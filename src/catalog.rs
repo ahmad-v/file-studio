@@ -119,9 +119,9 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
     Ok(db)
 }
 
-/// Unix filesystem device and root-directory inode avoid treating the current
-/// mount path as identity. Other platforms use a full-rescan fallback because
-/// stable volume/file identifiers are unavailable through the pinned stable API.
+/// Filesystem device and root-directory identity avoid treating the current
+/// mount path as identity. Platforms without stable standard-library metadata
+/// identifiers use a full-rescan fallback.
 pub(super) fn stable_source_identity(root: &Path) -> Option<String> {
     #[cfg(unix)]
     {
@@ -130,7 +130,17 @@ pub(super) fn stable_source_identity(root: &Path) -> Option<String> {
             .ok()
             .map(|metadata| format!("unix-dev:{}-ino:{}", metadata.dev(), metadata.ino()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let metadata = fs::metadata(root).ok()?;
+        Some(format!(
+            "windows-volume:{}-file:{}",
+            metadata.volume_serial_number()?,
+            metadata.file_index()?
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = root;
         None
@@ -617,6 +627,20 @@ mod tests {
             stable_source_identity(&original_mount_path),
             stable_source_identity(&new_mount_path)
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_identity_uses_volume_and_directory_ids_not_mount_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalogue-root");
+        fs::create_dir(&root).unwrap();
+        let canonical = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            stable_source_identity(&root),
+            stable_source_identity(&canonical)
+        );
+        assert!(stable_source_identity(&root).is_some());
     }
 
     #[test]
