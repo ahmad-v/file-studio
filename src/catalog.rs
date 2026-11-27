@@ -132,13 +132,15 @@ pub(super) fn stable_source_identity(root: &Path) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let metadata = fs::metadata(root).ok()?;
-        Some(format!(
-            "windows-volume:{}-file:{}",
-            metadata.volume_serial_number()?,
-            metadata.file_index()?
-        ))
+        match file_id::get_low_res_file_id(root).ok()? {
+            file_id::FileId::LowRes {
+                volume_serial_number,
+                file_index,
+            } => Some(format!(
+                "windows-volume:{volume_serial_number}-file:{file_index}"
+            )),
+            _ => None,
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
