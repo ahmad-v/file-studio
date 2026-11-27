@@ -47,6 +47,7 @@ enum RequestKind {
     Search,
     History,
     Refresh,
+    CompareSnapshots,
     InspectSelection,
     Operation,
 }
@@ -199,6 +200,9 @@ struct StudioUi {
     search_results: Option<SearchReport>,
     history: Vec<file_studio::catalogue_workspace::ScanSummary>,
     history_truncated: bool,
+    compare_before: String,
+    compare_after: String,
+    comparison_report: Option<String>,
     inspection_path: Option<String>,
     inspection_catalogued_bytes: Option<u64>,
     inspection_report: Option<String>,
@@ -232,6 +236,9 @@ enum Message {
     Search,
     LoadHistory,
     Refresh,
+    CompareSnapshots,
+    CompareBefore(String),
+    CompareAfter(String),
     InspectCatalogueFile(String),
     PreviousPage,
     NextPage,
@@ -285,6 +292,9 @@ impl StudioUi {
             search_results: None,
             history: Vec::new(),
             history_truncated: false,
+            compare_before: String::new(),
+            compare_after: String::new(),
+            comparison_report: None,
             inspection_path: None,
             inspection_catalogued_bytes: None,
             inspection_report: None,
@@ -426,6 +436,9 @@ impl StudioUi {
             Message::Search => return self.start_search(),
             Message::LoadHistory => return self.start_history(),
             Message::Refresh => return self.start_refresh(),
+            Message::CompareBefore(value) => self.compare_before = value,
+            Message::CompareAfter(value) => self.compare_after = value,
+            Message::CompareSnapshots => return self.start_snapshot_comparison(),
             Message::InspectCatalogueFile(relative) => {
                 return self.start_catalogue_inspection(relative)
             }
@@ -523,6 +536,10 @@ impl StudioUi {
                             RequestKind::InspectSelection => {
                                 self.inspection_report =
                                     Some(format!("Inspection failed: {}", error.message));
+                            }
+                            RequestKind::CompareSnapshots => {
+                                self.comparison_report =
+                                    Some(format!("Comparison failed: {}", error.message));
                             }
                             _ => {}
                         }
@@ -630,6 +647,39 @@ impl StudioUi {
         self.submit(RequestKind::InspectSelection, request)
     }
 
+    fn start_snapshot_comparison(&mut self) -> Task<Message> {
+        if self.job.is_some() {
+            return Task::none();
+        }
+        let (Ok(before), Ok(after)) = (
+            self.compare_before.trim().parse::<i64>(),
+            self.compare_after.trim().parse::<i64>(),
+        ) else {
+            self.status = "Enter two scan IDs shown in the history table.".into();
+            return Task::none();
+        };
+        if before < 1 || after < 1 || before == after {
+            self.status = "Choose two different positive scan IDs.".into();
+            return Task::none();
+        }
+        if self.catalogue_path.trim().is_empty() {
+            self.status = "Open a saved SQLite catalogue before comparing snapshots.".into();
+            return Task::none();
+        }
+        let request = Request {
+            operation: "catalog-compare-snapshots".into(),
+            input: selected_or_typed(self.catalogue_selection.as_ref(), &self.catalogue_path),
+            parameter: serde_json::json!({
+                "before_scan_id": before,
+                "after_scan_id": after,
+            })
+            .to_string(),
+            ..Request::default()
+        };
+        self.comparison_report = Some("Comparing saved snapshots…".into());
+        self.submit(RequestKind::CompareSnapshots, request)
+    }
+
     fn start_operation(&mut self) -> Task<Message> {
         if self.job.is_some() {
             return Task::none();
@@ -713,6 +763,14 @@ impl StudioUi {
                 }
                 Err(error) => self.status = format!("Could not display scan history: {error}"),
             },
+            RequestKind::CompareSnapshots => {
+                let mut preview = outcome.preview;
+                for warning in outcome.warnings {
+                    preview.push_str(&format!("\nWarning: {warning}"));
+                }
+                self.comparison_report = Some(preview);
+                self.status = "Compared retained snapshots using saved catalogue data only.".into();
+            }
             RequestKind::Refresh => {
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
@@ -1068,6 +1126,38 @@ impl StudioUi {
             history_table = history_table.push(text("Showing the latest 100 snapshots."));
         }
 
+        let comparison = column![
+            text("Compare saved snapshots").size(20),
+            text("Enter two scan IDs from the history table. The comparison reads only the local catalogue and reports whether both scans share a stable source identity."),
+            row![
+                text_input("Earlier scan ID", &self.compare_before)
+                    .on_input(Message::CompareBefore)
+                    .width(Length::Fixed(160.0)),
+                text_input("Later scan ID", &self.compare_after)
+                    .on_input(Message::CompareAfter)
+                    .width(Length::Fixed(160.0)),
+                button("Compare snapshots").on_press_maybe(
+                    (self.job.is_none()
+                        && !self.compare_before.trim().is_empty()
+                        && !self.compare_after.trim().is_empty())
+                    .then_some(Message::CompareSnapshots)
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .wrap(),
+        ]
+        .spacing(8);
+        let comparison = if let Some(report) = &self.comparison_report {
+            comparison.push(
+                container(text(report).wrapping(text::Wrapping::WordOrGlyph))
+                    .padding(8)
+                    .width(Length::Fill),
+            )
+        } else {
+            comparison.push(text("No snapshot comparison has been run."))
+        };
+
         scrollable(
             column![
                 text("Offline file catalogue").size(22),
@@ -1079,6 +1169,7 @@ impl StudioUi {
                 result_table,
                 inspector,
                 history_table,
+                comparison,
             ]
             .spacing(12),
         )
@@ -1160,6 +1251,7 @@ fn request_title(kind: RequestKind) -> &'static str {
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
+        RequestKind::CompareSnapshots => "Snapshot comparison",
         RequestKind::InspectSelection => "Selected file inspection",
         RequestKind::Operation => "Operation",
     }
