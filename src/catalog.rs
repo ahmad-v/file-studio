@@ -598,6 +598,13 @@ fn indexed_scan(db: &Connection, scan_id: i64, job: &Job) -> Result<BTreeMap<Str
 struct Inventory {
     schema_version: u32,
     files: Vec<Entry>,
+    #[serde(default)]
+    complete: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "warnings")]
+    _warnings: Vec<String>,
+    #[serde(default, rename = "omitted_warnings")]
+    _omitted_warnings: usize,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -640,7 +647,14 @@ fn load(catalog: &Path, job: &Job) -> Result<Inventory> {
     let bytes = read_bounded(catalog, 16 * 1024 * 1024)?;
     job.check()?;
     let inventory: Inventory = serde_json::from_slice(&bytes)?;
-    if inventory.schema_version != 1 {
+    if inventory.schema_version == 2 && inventory.complete == Some(false) {
+        return Err(Error::input(
+            "This scan is incomplete and cannot be searched or compared as a full inventory",
+        ));
+    }
+    if inventory.schema_version != 1
+        && !(inventory.schema_version == 2 && inventory.complete == Some(true))
+    {
         return Err(Error::input("Unsupported inventory version"));
     }
     if inventory.files.len() > MAX_ENTRIES {

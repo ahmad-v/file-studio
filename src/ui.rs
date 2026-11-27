@@ -776,6 +776,15 @@ impl StudioUi {
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
                 self.search_results = None;
+                if outcome.written.is_none() {
+                    self.status = "Partial directory scan: catalogue was not updated, and previous scan history was preserved.".into();
+                    let mut preview = outcome.preview;
+                    for warning in outcome.warnings {
+                        preview.push_str(&format!("\nWarning: {warning}"));
+                    }
+                    self.comparison_report = Some(preview);
+                    return Task::none();
+                }
                 self.status = match serde_json::from_str::<serde_json::Value>(&outcome.preview) {
                     Ok(report) if report["comparison_mode"] == "same-source" => format!(
                         "Saved scan {}: {} files, {} total bytes; {} added, {} changed, {} removed. Refreshing history…",
