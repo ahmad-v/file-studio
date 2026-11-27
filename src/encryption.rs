@@ -14,6 +14,7 @@ use std::{
 };
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ENCRYPTED_OVERHEAD: u64 = 2 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 
 pub fn generate_key(output: &Path) -> Result<Value> {
@@ -79,7 +80,7 @@ pub fn decrypt(input: &Path, output: &Path, identity_path: &Path, job: &Job) -> 
     let identity = load_identity(identity_path)?;
     let (mut source, before) = open_regular(input)?;
     let source_guard = source.try_clone()?;
-    if before.len() > MAX_FILE_BYTES + 1024 * 1024 {
+    if before.len() > MAX_FILE_BYTES + MAX_ENCRYPTED_OVERHEAD {
         return Err(Error::input(
             "Encrypted input exceeds the 4 GiB processing limit",
         ));
