@@ -126,16 +126,16 @@
     },
     {
       "operation": "catalog-refresh",
-      "description": "Append a complete transactional scan snapshot to a versioned SQLite catalogue",
+      "description": "Append an immutable scan snapshot, migrate schema v1 safely, and report path deltas only for matching Linux filesystem/root identity",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"
       ],
-      "fixture_status": "Linux fixture verified transactional append, preserved history, offline search after source removal, and comparison"
+      "fixture_status": "Existing transactional append fixture; identity matching, mismatch fallback, and schema-v1 migration tests added but not yet executed"
     },
     {
       "operation": "catalog-history",
-      "description": "Read recent scan timestamps, root labels and size/file totals from a SQLite catalogue",
+      "description": "Read recent scan timestamps, root labels, size/file totals, and safe refresh delta classifications from a SQLite catalogue",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"

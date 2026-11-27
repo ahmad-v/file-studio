@@ -1,5 +1,5 @@
 use localwright_core::{read_bounded, write_new, Error, ErrorKind, Job, Result};
-use rusqlite::{config::DbConfig, limits::Limit, Connection, OpenFlags};
+use rusqlite::{config::DbConfig, limits::Limit, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -10,7 +10,7 @@ use std::{
 };
 
 const CATALOG_APPLICATION_ID: i64 = 0x4c57_5243;
-const CATALOG_SCHEMA_VERSION: i64 = 1;
+const CATALOG_SCHEMA_VERSION: i64 = 2;
 const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PATH_BYTES: i32 = 64 * 1024;
 
@@ -80,14 +80,89 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .map_err(sqlite_error)?;
     if application_id != CATALOG_APPLICATION_ID
-        || version != CATALOG_SCHEMA_VERSION
+        || !(1..=CATALOG_SCHEMA_VERSION).contains(&version)
         || page_size != 4096
     {
         return Err(Error::input(
             "Unsupported or non-File-Studio catalogue database",
         ));
     }
+    if writable && version == 1 {
+        // Schema v1 did not store source identity. Preserve its history and mark
+        // those rows unknown so the first refresh safely establishes a baseline.
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE scans ADD COLUMN source_id TEXT;
+             ALTER TABLE scans ADD COLUMN comparison_mode TEXT NOT NULL DEFAULT 'unknown';
+             ALTER TABLE scans ADD COLUMN added_count INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE scans ADD COLUMN changed_count INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE scans ADD COLUMN removed_count INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version=2;
+             COMMIT;",
+        )
+        .map_err(sqlite_error)?;
+    }
     Ok(db)
+}
+
+/// Linux device and root-directory inode identify the scanned filesystem root
+/// independently of its current mount path. Other targets deliberately report
+/// unknown identity until a portable identifier can be obtained reliably.
+fn stable_source_identity(root: &Path) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return fs::metadata(root)
+            .ok()
+            .map(|metadata| format!("linux-stdev:{}-ino:{}", metadata.dev(), metadata.ino()));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        None
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Delta {
+    mode: &'static str,
+    added: usize,
+    changed: usize,
+    removed: usize,
+}
+
+fn reconcile(
+    previous_id: Option<&str>,
+    current_id: Option<&str>,
+    before: &[Entry],
+    after: &[Entry],
+) -> Delta {
+    if previous_id.is_none() || current_id.is_none() || previous_id != current_id {
+        return Delta {
+            mode: "full-rescan",
+            ..Delta::default()
+        };
+    }
+    let old = before
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.bytes))
+        .collect::<BTreeMap<_, _>>();
+    let new = after
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.bytes))
+        .collect::<BTreeMap<_, _>>();
+    let added = new.keys().filter(|path| !old.contains_key(**path)).count();
+    let removed = old.keys().filter(|path| !new.contains_key(**path)).count();
+    let changed = new
+        .iter()
+        .filter(|(path, bytes)| old.get(**path).is_some_and(|old_bytes| old_bytes != *bytes))
+        .count();
+    Delta {
+        mode: "same-source",
+        added,
+        changed,
+        removed,
+    }
 }
 
 fn scanned_unix_ms() -> Result<i64> {
@@ -107,7 +182,14 @@ fn root_label(root: &Path) -> String {
         .collect()
 }
 
-fn insert_scan(db: &mut Connection, label: &str, files: &[Value], job: &Job) -> Result<i64> {
+fn insert_scan(
+    db: &mut Connection,
+    label: &str,
+    source_id: Option<&str>,
+    delta: &Delta,
+    files: &[Value],
+    job: &Job,
+) -> Result<i64> {
     if files.len() > 10_000 {
         return Err(Error::new(ErrorKind::Limit, "Scan exceeds 10,000 files"));
     }
@@ -115,8 +197,8 @@ fn insert_scan(db: &mut Connection, label: &str, files: &[Value], job: &Job) -> 
     let transaction = db.transaction().map_err(sqlite_error)?;
     transaction
         .execute(
-            "INSERT INTO scans(scanned_unix_ms, root_label, file_count, total_bytes) VALUES(?1, ?2, 0, '0')",
-            (scanned_at, label),
+            "INSERT INTO scans(scanned_unix_ms, root_label, file_count, total_bytes, source_id, comparison_mode, added_count, changed_count, removed_count) VALUES(?1, ?2, 0, '0', ?3, ?4, ?5, ?6, ?7)",
+            (scanned_at, label, source_id, delta.mode, delta.added as i64, delta.changed as i64, delta.removed as i64),
         )
         .map_err(sqlite_error)?;
     let scan_id = transaction.last_insert_rowid();
@@ -205,7 +287,7 @@ pub fn create(root: &Path, files: &[Value], output: &Path, job: &Job) -> Result<
     configure(&db)?;
     db.execute_batch(&format!(
         "PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA page_size=4096; PRAGMA max_page_count={}; PRAGMA application_id={}; PRAGMA user_version={};
-         CREATE TABLE scans(id INTEGER PRIMARY KEY, scanned_unix_ms INTEGER NOT NULL, root_label TEXT NOT NULL, file_count INTEGER NOT NULL, total_bytes TEXT NOT NULL);
+         CREATE TABLE scans(id INTEGER PRIMARY KEY, scanned_unix_ms INTEGER NOT NULL, root_label TEXT NOT NULL, file_count INTEGER NOT NULL, total_bytes TEXT NOT NULL, source_id TEXT, comparison_mode TEXT NOT NULL, added_count INTEGER NOT NULL, changed_count INTEGER NOT NULL, removed_count INTEGER NOT NULL);
          CREATE TABLE files(scan_id INTEGER NOT NULL REFERENCES scans(id), path TEXT NOT NULL, bytes TEXT NOT NULL, PRIMARY KEY(scan_id,path)) WITHOUT ROWID;
          CREATE INDEX files_path ON files(path);",
         MAX_CATALOG_BYTES / 4096,
@@ -213,7 +295,18 @@ pub fn create(root: &Path, files: &[Value], output: &Path, job: &Job) -> Result<
         CATALOG_SCHEMA_VERSION,
     ))
     .map_err(sqlite_error)?;
-    let scan_id = insert_scan(&mut db, &root_label(&root), files, job)?;
+    let baseline = Delta {
+        mode: "baseline",
+        ..Delta::default()
+    };
+    let scan_id = insert_scan(
+        &mut db,
+        &root_label(&root),
+        stable_source_identity(&root).as_deref(),
+        &baseline,
+        files,
+        job,
+    )?;
     db.close().map_err(|(_, error)| sqlite_error(error))?;
 
     let mut source = fs::File::open(&database_path)?;
@@ -258,7 +351,44 @@ pub fn refresh(path: &Path, root: &Path, files: &[Value], job: &Job) -> Result<V
         MAX_CATALOG_BYTES / 4096
     ))
     .map_err(sqlite_error)?;
-    let transaction_will_add_history = insert_scan(&mut db, &root_label(&root), files, job)?;
+    let previous_id: Option<String> = db
+        .query_row(
+            "SELECT source_id FROM scans ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    let previous = latest_scan(&db, job)?.1;
+    let source_id = stable_source_identity(&root);
+    let current = files
+        .iter()
+        .map(|file| {
+            Ok(Entry {
+                path: file["path"]
+                    .as_str()
+                    .ok_or_else(|| Error::input("Scan report contains an invalid path"))?
+                    .to_owned(),
+                bytes: file["bytes"]
+                    .as_u64()
+                    .ok_or_else(|| Error::input("Scan report contains an invalid file size"))?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let delta = reconcile(
+        previous_id.as_deref(),
+        source_id.as_deref(),
+        &previous,
+        &current,
+    );
+    let transaction_will_add_history = insert_scan(
+        &mut db,
+        &root_label(&root),
+        source_id.as_deref(),
+        &delta,
+        files,
+        job,
+    )?;
     let report = db
         .query_row(
             "SELECT scanned_unix_ms, file_count, total_bytes FROM scans WHERE id=?1",
@@ -278,15 +408,25 @@ pub fn refresh(path: &Path, root: &Path, files: &[Value], job: &Job) -> Result<V
         "scanned_unix_ms": report.0,
         "files": report.1,
         "total_bytes": report.2,
+        "comparison_mode": delta.mode,
+        "added": delta.added,
+        "changed": delta.changed,
+        "removed": delta.removed,
         "history": true,
     }))
 }
 
 pub fn history(path: &Path, job: &Job) -> Result<Value> {
     let db = open_catalog(path, false)?;
-    let mut statement = db
-        .prepare("SELECT id, scanned_unix_ms, root_label, file_count, total_bytes FROM scans ORDER BY id DESC LIMIT 101")
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(sqlite_error)?;
+    let sql = if version >= 2 {
+        "SELECT id, scanned_unix_ms, root_label, file_count, total_bytes, comparison_mode, added_count, changed_count, removed_count FROM scans ORDER BY id DESC LIMIT 101"
+    } else {
+        "SELECT id, scanned_unix_ms, root_label, file_count, total_bytes, 'unknown', 0, 0, 0 FROM scans ORDER BY id DESC LIMIT 101"
+    };
+    let mut statement = db.prepare(sql).map_err(sqlite_error)?;
     let rows = statement
         .query_map([], |row| {
             Ok(json!({
@@ -295,6 +435,10 @@ pub fn history(path: &Path, job: &Job) -> Result<Value> {
                 "root_label": row.get::<_, String>(2)?,
                 "files": row.get::<_, i64>(3)?,
                 "total_bytes": row.get::<_, String>(4)?,
+                "comparison_mode": row.get::<_, String>(5)?,
+                "added": row.get::<_, i64>(6)?,
+                "changed": row.get::<_, i64>(7)?,
+                "removed": row.get::<_, i64>(8)?,
             }))
         })
         .map_err(sqlite_error)?;
@@ -413,4 +557,116 @@ fn indexed(path: &Path, job: &Job) -> Result<BTreeMap<String, u64>> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(files: &[(&str, u64)]) -> Vec<Entry> {
+        files
+            .iter()
+            .map(|(path, bytes)| Entry {
+                path: (*path).to_owned(),
+                bytes: *bytes,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_filesystem_identity_reconciles_paths_across_mount_path_changes() {
+        // Mount paths are deliberately absent from the matching contract. This
+        // simulates a moved mount and a remount retaining the same filesystem ID.
+        let before = entries(&[("keep", 1), ("change", 2), ("remove", 3)]);
+        let after = entries(&[("keep", 1), ("change", 4), ("add", 5)]);
+        let delta = reconcile(
+            Some("linux-stdev:42-ino:6"),
+            Some("linux-stdev:42-ino:6"),
+            &before,
+            &after,
+        );
+        assert_eq!(delta.mode, "same-source");
+        assert_eq!((delta.added, delta.changed, delta.removed), (1, 1, 1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_identity_survives_a_different_path_to_the_same_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let original_mount_path = directory.path().join("volume-old");
+        let new_mount_path = directory.path().join("volume-new");
+        fs::create_dir(&original_mount_path).unwrap();
+        std::os::unix::fs::symlink(&original_mount_path, &new_mount_path).unwrap();
+
+        assert_eq!(
+            stable_source_identity(&original_mount_path),
+            stable_source_identity(&new_mount_path)
+        );
+    }
+
+    #[test]
+    fn changed_or_unknown_identity_forces_full_rescan_without_claiming_deltas() {
+        let before = entries(&[("old", 1)]);
+        let after = entries(&[("new", 1)]);
+        for (previous, current) in [
+            (Some("linux-stdev:1-ino:9"), Some("linux-stdev:2-ino:9")),
+            (None, Some("linux-stdev:2-ino:9")),
+            (Some("linux-stdev:1-ino:9"), None),
+            (None, None),
+        ] {
+            let delta = reconcile(previous, current, &before, &after);
+            assert_eq!(delta.mode, "full-rescan");
+            assert_eq!((delta.added, delta.changed, delta.removed), (0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn schema_v1_catalogue_migrates_without_dropping_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "PRAGMA page_size=4096;
+             PRAGMA application_id={CATALOG_APPLICATION_ID};
+             PRAGMA user_version=1;
+             CREATE TABLE scans(id INTEGER PRIMARY KEY, scanned_unix_ms INTEGER NOT NULL, root_label TEXT NOT NULL, file_count INTEGER NOT NULL, total_bytes TEXT NOT NULL);
+             CREATE TABLE files(scan_id INTEGER NOT NULL REFERENCES scans(id), path TEXT NOT NULL, bytes TEXT NOT NULL, PRIMARY KEY(scan_id,path)) WITHOUT ROWID;
+             INSERT INTO scans VALUES(1, 1000, 'Old disk', 1, '4');
+             INSERT INTO files VALUES(1, 'old.txt', '4');"
+        )).unwrap();
+        drop(db);
+
+        let migrated = open_catalog(&path, true).unwrap();
+        let version: i64 = migrated
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let source_id: Option<String> = migrated
+            .query_row("SELECT source_id FROM scans WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let count: i64 = migrated
+            .query_row("SELECT COUNT(*) FROM files WHERE scan_id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(source_id, None);
+        assert_eq!(count, 1);
+        drop(migrated);
+
+        let root = directory.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let refresh = refresh(
+            &path,
+            &root,
+            &[json!({"path":"new.txt", "bytes":1})],
+            &Job::new(),
+        )
+        .unwrap();
+        assert_eq!(refresh["comparison_mode"], "full-rescan");
+        let history = history(&path, &Job::new()).unwrap();
+        assert_eq!(history["scans"][0]["comparison_mode"], "full-rescan");
+        assert_eq!(history["scans"][1]["comparison_mode"], "unknown");
+    }
 }

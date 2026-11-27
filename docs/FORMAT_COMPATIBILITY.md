@@ -6,7 +6,7 @@ No capability is marked device-verified or released. Previous hosted jobs passed
 |---|---|---|
 | catalog-compare | Compare JSON inventories or latest SQLite catalogue snapshots by path and size | Linux fixture-tested |
 | catalog-history | Read the latest 100 SQLite scan snapshots without accessing original paths | Linux integration fixture-tested |
-| catalog-refresh | Append a full bounded scan snapshot to versioned SQLite history | Linux integration fixture-tested |
+| catalog-refresh | Append schema-v2 full scans; classify path additions, size changes and removals only for matching Linux filesystem/root identity; safely fall back when identity is unknown or changed | Implementation and focused tests added; hosted verification pending |
 | file-times | Read creation, modification and access timestamps | Linux fixture-tested |
 | png-metadata / png-strip-metadata | PNG chunk inspection and removal of text and EXIF from a copy | Linux fixture-tested |
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |

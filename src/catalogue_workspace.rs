@@ -36,6 +36,14 @@ pub struct ScanSummary {
     pub root_label: String,
     pub files: i64,
     pub total_bytes: String,
+    #[serde(default)]
+    pub comparison_mode: String,
+    #[serde(default)]
+    pub added: i64,
+    #[serde(default)]
+    pub changed: i64,
+    #[serde(default)]
+    pub removed: i64,
 }
 
 impl SearchReport {
@@ -60,7 +68,7 @@ impl SearchReport {
 impl HistoryReport {
     pub fn parse(input: &str) -> Result<Self, String> {
         let report: Self = serde_json::from_str(input).map_err(|error| error.to_string())?;
-        if report.schema_version != 1 {
+        if !(1..=2).contains(&report.schema_version) {
             return Err("Unsupported catalogue history report version".into());
         }
         if report.scans.len() > 100
@@ -71,6 +79,11 @@ impl HistoryReport {
                     || scan.root_label.is_empty()
                     || scan.root_label.len() > 255
                     || scan.total_bytes.parse::<u128>().is_err()
+                    || scan.added < 0
+                    || scan.changed < 0
+                    || scan.removed < 0
+                    || !["", "unknown", "baseline", "same-source", "full-rescan"]
+                        .contains(&scan.comparison_mode.as_str())
             })
         {
             return Err("Catalogue history report is invalid or exceeds display limits".into());
@@ -129,12 +142,13 @@ mod tests {
     #[test]
     fn parses_history_and_bounds_displayed_rows() {
         let report = HistoryReport::parse(
-            r#"{"schema_version":1,"scans":[{"scan_id":3,"scanned_unix_ms":1760000000000,"root_label":"Research","files":7,"total_bytes":"987654321"}],"truncated":false}"#,
+            r#"{"schema_version":2,"scans":[{"scan_id":3,"scanned_unix_ms":1760000000000,"root_label":"Research","files":7,"total_bytes":"987654321","comparison_mode":"same-source","added":2,"changed":1,"removed":3}],"truncated":false}"#,
         )
         .unwrap();
         assert_eq!(report.scans[0].root_label, "Research");
+        assert_eq!(report.scans[0].comparison_mode, "same-source");
         assert!(
-            HistoryReport::parse(r#"{"schema_version":2,"scans":[],"truncated":false}"#).is_err()
+            HistoryReport::parse(r#"{"schema_version":3,"scans":[],"truncated":false}"#).is_err()
         );
     }
 

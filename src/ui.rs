@@ -581,11 +581,19 @@ impl StudioUi {
             RequestKind::Refresh => {
                 self.search_results = None;
                 self.status = match serde_json::from_str::<serde_json::Value>(&outcome.preview) {
-                    Ok(report) => format!(
-                        "Saved scan {}: {} files, {} total bytes. Refreshing history…",
+                    Ok(report) if report["comparison_mode"] == "same-source" => format!(
+                        "Saved scan {}: {} files, {} total bytes; {} added, {} changed, {} removed. Refreshing history…",
                         report["scan_id"].as_i64().unwrap_or_default(),
                         report["files"].as_u64().unwrap_or_default(),
-                        report["total_bytes"].as_str().unwrap_or("unknown")
+                        report["total_bytes"].as_str().unwrap_or("unknown"),
+                        report["added"].as_u64().unwrap_or_default(),
+                        report["changed"].as_u64().unwrap_or_default(),
+                        report["removed"].as_u64().unwrap_or_default(),
+                    ),
+                    Ok(report) => format!(
+                        "Saved full-rescan baseline {}: {} files. Volume identity changed or is unavailable; no cross-volume deltas were inferred. Refreshing history…",
+                        report["scan_id"].as_i64().unwrap_or_default(),
+                        report["files"].as_u64().unwrap_or_default(),
                     ),
                     Err(_) => "Catalogue refresh finished; refreshing scan history…".into(),
                 };
@@ -818,6 +826,7 @@ impl StudioUi {
                 text("Scan / source").width(Length::FillPortion(3)),
                 text("Files").width(Length::Fixed(80.0)),
                 text("Total size").width(Length::Fixed(120.0)),
+                text("Refresh delta").width(Length::Fixed(190.0)),
                 text("Timestamp (UTC ms)").width(Length::Fixed(180.0)),
             ]
             .spacing(8),
@@ -842,6 +851,16 @@ impl StudioUi {
                     .width(Length::FillPortion(3)),
                     text(scan.files.to_string()).width(Length::Fixed(80.0)),
                     text(size).width(Length::Fixed(120.0)),
+                    text(if scan.comparison_mode == "same-source" {
+                        format!("+{} ~{} −{}", scan.added, scan.changed, scan.removed)
+                    } else if scan.comparison_mode == "full-rescan" {
+                        "Full rescan; identity changed/unknown".to_owned()
+                    } else if scan.comparison_mode == "unknown" {
+                        "Legacy snapshot; identity unknown".to_owned()
+                    } else {
+                        "Baseline".to_owned()
+                    })
+                    .width(Length::Fixed(190.0)),
                     text(scan.scanned_unix_ms.to_string()).width(Length::Fixed(180.0)),
                 ]
                 .spacing(8),

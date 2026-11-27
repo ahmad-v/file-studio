@@ -90,7 +90,7 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Search a saved file inventory",
         hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
-    Operation { id: "catalog-refresh", label: "Add catalogue scan history", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a versioned snapshot without deleting prior scans; keep the catalogue outside the scanned tree." },
+    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Linux filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation {
         id: "scan",
@@ -1307,7 +1307,7 @@ pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
         preview: serde_json::to_string_pretty(&report)?,
         written: Some(r.output),
         warnings: vec![
-            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available.".into(),
+            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts are inferred only when the stable source identity matches; otherwise no cross-source comparison is claimed.".into(),
         ],
         ..Outcome::default()
     })
@@ -1560,10 +1560,17 @@ mod tests {
             Job::new(),
         )
         .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&refreshed.preview).unwrap()["history"],
-            true
-        );
+        let refresh_report: Value = serde_json::from_str(&refreshed.preview).unwrap();
+        assert_eq!(refresh_report["history"], true);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(refresh_report["comparison_mode"], "same-source");
+            assert_eq!(refresh_report["added"], 1);
+            assert_eq!(refresh_report["changed"], 1);
+            assert_eq!(refresh_report["removed"], 0);
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(refresh_report["comparison_mode"], "full-rescan");
         let compared = handle(
             Request {
                 operation: "catalog-compare".into(),
