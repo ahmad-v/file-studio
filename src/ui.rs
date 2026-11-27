@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use file_studio::catalogue_workspace::{display_path, format_bytes, HistoryReport, SearchReport};
+use file_studio::catalogue_workspace::{
+    display_path, format_bytes, DuplicateReport, HistoryReport, SearchReport,
+};
 use futures::channel::oneshot;
 use iced::{
     keyboard::{key::Named, Key, Modifiers},
@@ -22,6 +24,7 @@ use std::{
 
 const SCALES: [u16; 7] = [80, 100, 125, 150, 200, 250, 300];
 const PAGE_SIZE: usize = 100;
+const DUPLICATE_PAGE_SIZE: usize = 20;
 
 fn selected_or_typed(selected: Option<&PathBuf>, typed: &str) -> PathBuf {
     selected.cloned().unwrap_or_else(|| PathBuf::from(typed))
@@ -48,6 +51,7 @@ enum RequestKind {
     History,
     Refresh,
     CompareSnapshots,
+    Duplicates,
     InspectSelection,
     Operation,
 }
@@ -200,6 +204,8 @@ struct StudioUi {
     search_results: Option<SearchReport>,
     history: Vec<file_studio::catalogue_workspace::ScanSummary>,
     history_truncated: bool,
+    duplicate_report: Option<DuplicateReport>,
+    duplicate_page_index: usize,
     compare_before: String,
     compare_after: String,
     comparison_report: Option<String>,
@@ -236,12 +242,15 @@ enum Message {
     Search,
     LoadHistory,
     Refresh,
+    FindDuplicates,
     CompareSnapshots,
     CompareBefore(String),
     CompareAfter(String),
     InspectCatalogueFile(String),
     PreviousPage,
     NextPage,
+    PreviousDuplicatePage,
+    NextDuplicatePage,
     Operation(String),
     Input(String),
     Output(String),
@@ -292,6 +301,8 @@ impl StudioUi {
             search_results: None,
             history: Vec::new(),
             history_truncated: false,
+            duplicate_report: None,
+            duplicate_page_index: 0,
             compare_before: String::new(),
             compare_after: String::new(),
             comparison_report: None,
@@ -340,6 +351,8 @@ impl StudioUi {
             Message::RootPath(path) => {
                 self.root_path = path;
                 self.root_selection = None;
+                self.duplicate_report = None;
+                self.duplicate_page_index = 0;
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
@@ -428,6 +441,8 @@ impl StudioUi {
                 if let Some(path) = path {
                     self.root_path = path.to_string_lossy().into_owned();
                     self.root_selection = Some(path);
+                    self.duplicate_report = None;
+                    self.duplicate_page_index = 0;
                     self.inspection_path = None;
                     self.inspection_catalogued_bytes = None;
                     self.inspection_report = None;
@@ -436,6 +451,7 @@ impl StudioUi {
             Message::Search => return self.start_search(),
             Message::LoadHistory => return self.start_history(),
             Message::Refresh => return self.start_refresh(),
+            Message::FindDuplicates => return self.start_duplicate_review(),
             Message::CompareBefore(value) => self.compare_before = value,
             Message::CompareAfter(value) => self.compare_after = value,
             Message::CompareSnapshots => return self.start_snapshot_comparison(),
@@ -446,6 +462,14 @@ impl StudioUi {
             Message::NextPage => {
                 if self.page_index + 1 < self.page_count() {
                     self.page_index += 1;
+                }
+            }
+            Message::PreviousDuplicatePage => {
+                self.duplicate_page_index = self.duplicate_page_index.saturating_sub(1)
+            }
+            Message::NextDuplicatePage => {
+                if self.duplicate_page_index + 1 < self.duplicate_page_count() {
+                    self.duplicate_page_index += 1;
                 }
             }
             Message::Operation(operation) => self.selected_operation = operation,
@@ -533,6 +557,7 @@ impl StudioUi {
                         self.status = format!("{} failed: {}", request_title(kind), error.message);
                         match kind {
                             RequestKind::Operation => self.operation_preview = error.message,
+                            RequestKind::Duplicates => self.duplicate_report = None,
                             RequestKind::InspectSelection => {
                                 self.inspection_report =
                                     Some(format!("Inspection failed: {}", error.message));
@@ -600,6 +625,8 @@ impl StudioUi {
             self.status = "Choose an existing SQLite catalogue and a folder to rescan.".into();
             return Task::none();
         }
+        self.duplicate_report = None;
+        self.duplicate_page_index = 0;
         let request = Request {
             operation: "workspace-catalog-refresh".into(),
             input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
@@ -607,6 +634,24 @@ impl StudioUi {
             ..Request::default()
         };
         self.submit(RequestKind::Refresh, request)
+    }
+
+    fn start_duplicate_review(&mut self) -> Task<Message> {
+        if self.job.is_some() {
+            return Task::none();
+        }
+        if self.root_path.trim().is_empty() {
+            self.status = "Choose the source folder before checking duplicate candidates.".into();
+            return Task::none();
+        }
+        self.duplicate_report = None;
+        self.duplicate_page_index = 0;
+        let request = Request {
+            operation: "duplicates".into(),
+            input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
+            ..Request::default()
+        };
+        self.submit(RequestKind::Duplicates, request)
     }
 
     fn start_catalogue_inspection(&mut self, relative: String) -> Task<Message> {
@@ -755,6 +800,21 @@ impl StudioUi {
                 }
                 Err(error) => self.status = format!("Could not display search results: {error}"),
             },
+            RequestKind::Duplicates => match DuplicateReport::parse(&outcome.preview) {
+                Ok(report) => {
+                    self.duplicate_page_index = 0;
+                    self.status = format!(
+                        "Scanned {} files; found {} groups with matching content hashes. No files were modified.",
+                        report.regular_files_scanned,
+                        report.groups.len()
+                    );
+                    self.duplicate_report = Some(report);
+                }
+                Err(error) => {
+                    self.duplicate_report = None;
+                    self.status = format!("Could not display duplicate candidates: {error}");
+                }
+            },
             RequestKind::History => match HistoryReport::parse(&outcome.preview) {
                 Ok(report) => {
                     self.history = report.scans;
@@ -842,6 +902,12 @@ impl StudioUi {
         self.search_results
             .as_ref()
             .map_or(0, |report| report.files.len().div_ceil(PAGE_SIZE))
+    }
+
+    fn duplicate_page_count(&self) -> usize {
+        self.duplicate_report.as_ref().map_or(0, |report| {
+            report.groups.len().div_ceil(DUPLICATE_PAGE_SIZE)
+        })
     }
 
     fn save_preferences(&mut self) {
@@ -1004,6 +1070,10 @@ impl StudioUi {
                     && !self.root_path.trim().is_empty())
                 .then_some(Message::Refresh)
             ),
+            button("Find duplicate candidates").on_press_maybe(
+                (self.job.is_none() && !self.root_path.trim().is_empty())
+                    .then_some(Message::FindDuplicates)
+            ),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
@@ -1070,6 +1140,66 @@ impl StudioUi {
         .spacing(6);
         if let Some(path) = &self.inspection_path {
             inspector = inspector.push(text(format!("Selected path: {}", display_path(path))));
+        }
+
+        let mut duplicate_view = column![
+            text("Duplicate candidates").size(20),
+            text("The selected source folder is scanned and files with matching BLAKE3 content hashes are grouped for review. Hashing is capped at 1 GiB of candidate data. This is read-only; no files are deleted or moved."),
+        ]
+        .spacing(6);
+        if let Some(report) = &self.duplicate_report {
+            if report.groups.is_empty() {
+                duplicate_view = duplicate_view.push(text(format!(
+                    "No matching content-hash groups among {} regular files.",
+                    report.regular_files_scanned
+                )));
+            }
+            let start = self.duplicate_page_index * DUPLICATE_PAGE_SIZE;
+            let end = (start + DUPLICATE_PAGE_SIZE).min(report.groups.len());
+            for group in report.groups.iter().skip(start).take(DUPLICATE_PAGE_SIZE) {
+                let mut group_view = column![text(format!(
+                    "{} files · {} each · BLAKE3 {}",
+                    group.paths.len(),
+                    format_bytes(group.bytes_per_file.into()),
+                    group.blake3
+                ))
+                .wrapping(text::Wrapping::WordOrGlyph)]
+                .spacing(4);
+                for path in group.paths.iter().take(8) {
+                    group_view = group_view
+                        .push(text(display_path(path)).wrapping(text::Wrapping::WordOrGlyph));
+                }
+                if group.paths.len() > 8 {
+                    group_view = group_view
+                        .push(text(format!("… and {} more paths", group.paths.len() - 8)));
+                }
+                duplicate_view =
+                    duplicate_view.push(container(group_view).padding(8).width(Length::Fill));
+            }
+            if report.groups.len() > DUPLICATE_PAGE_SIZE {
+                duplicate_view = duplicate_view.push(
+                    row![
+                        button("Previous groups").on_press_maybe(
+                            (self.duplicate_page_index > 0)
+                                .then_some(Message::PreviousDuplicatePage)
+                        ),
+                        text(format!(
+                            "Showing groups {}–{} of {}",
+                            start + 1,
+                            end,
+                            report.groups.len()
+                        )),
+                        button("Next groups").on_press_maybe(
+                            (end < report.groups.len()).then_some(Message::NextDuplicatePage)
+                        ),
+                    ]
+                    .spacing(8),
+                );
+            }
+        } else {
+            duplicate_view = duplicate_view.push(text(
+                "Choose a source folder and run the duplicate candidate scan to review matching hashes.",
+            ));
         }
         if let Some(bytes) = self.inspection_catalogued_bytes {
             inspector = inspector.push(text(format!(
@@ -1177,6 +1307,7 @@ impl StudioUi {
                 create_row,
                 result_table,
                 inspector,
+                duplicate_view,
                 history_table,
                 comparison,
             ]
@@ -1260,6 +1391,7 @@ fn request_title(kind: RequestKind) -> &'static str {
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
+        RequestKind::Duplicates => "Duplicate candidate scan",
         RequestKind::CompareSnapshots => "Snapshot comparison",
         RequestKind::InspectSelection => "Selected file inspection",
         RequestKind::Operation => "Operation",
@@ -1335,6 +1467,11 @@ mod tests {
         let _ = ui.update(Message::Refresh);
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose an existing SQLite catalogue"));
+        let _ = ui.update(Message::FindDuplicates);
+        assert!(ui.job.is_none());
+        assert!(ui
+            .status
+            .contains("Choose the source folder before checking duplicate candidates"));
         let _ = ui.update(Message::InspectCatalogueFile("report.txt".into()));
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose the source folder"));
@@ -1343,6 +1480,29 @@ mod tests {
         assert!(ui
             .status
             .contains("Choose the source folder before creating"));
+    }
+
+    #[test]
+    fn duplicate_candidate_groups_are_bounded_and_pageable() {
+        let mut ui = StudioUi::new(OPERATIONS, no_op);
+        ui.duplicate_report = Some(DuplicateReport {
+            schema_version: 1,
+            regular_files_scanned: 50,
+            groups: (0..25)
+                .map(|index| file_studio::catalogue_workspace::DuplicateGroup {
+                    bytes_per_file: index,
+                    blake3: "a".repeat(64),
+                    paths: vec![format!("file-{index}-a"), format!("file-{index}-b")],
+                })
+                .collect(),
+        });
+        assert_eq!(ui.duplicate_page_count(), 2);
+        let _ = ui.update(Message::NextDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 1);
+        let _ = ui.update(Message::NextDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 1);
+        let _ = ui.update(Message::PreviousDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 0);
     }
 
     #[cfg(unix)]

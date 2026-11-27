@@ -30,6 +30,22 @@ pub struct HistoryReport {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct DuplicateReport {
+    pub schema_version: u32,
+    pub regular_files_scanned: usize,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateGroup {
+    pub bytes_per_file: u64,
+    pub blake3: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ScanSummary {
     pub scan_id: i64,
     pub scanned_unix_ms: i64,
@@ -87,6 +103,39 @@ impl HistoryReport {
             })
         {
             return Err("Catalogue history report is invalid or exceeds display limits".into());
+        }
+        Ok(report)
+    }
+}
+
+impl DuplicateReport {
+    pub fn parse(input: &str) -> Result<Self, String> {
+        const MAX_CANDIDATES: usize = 10_000;
+        let report: Self = serde_json::from_str(input).map_err(|error| error.to_string())?;
+        let candidate_count = report
+            .groups
+            .iter()
+            .try_fold(0usize, |count, group| count.checked_add(group.paths.len()));
+        let Some(candidate_count) = candidate_count else {
+            return Err("Duplicate candidate report size overflows display limits".into());
+        };
+        if report.schema_version != 1
+            || report.regular_files_scanned > MAX_ROWS
+            || report.groups.len() > MAX_ROWS
+            || candidate_count > MAX_CANDIDATES
+            || candidate_count > report.regular_files_scanned
+            || report.groups.iter().any(|group| {
+                group.paths.len() < 2
+                    || group.blake3.len() != 64
+                    || !group.blake3.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || group.paths.iter().any(|path| {
+                        path.is_empty() || path.len() > 64 * 1024 || path.contains('\0')
+                    })
+            })
+        {
+            return Err(
+                "Duplicate candidate report is inconsistent or exceeds display limits".into(),
+            );
         }
         Ok(report)
     }
@@ -150,6 +199,23 @@ mod tests {
         assert!(
             HistoryReport::parse(r#"{"schema_version":3,"scans":[],"truncated":false}"#).is_err()
         );
+    }
+
+    #[test]
+    fn parses_content_hash_duplicate_candidates_and_rejects_invalid_groups() {
+        let report = DuplicateReport::parse(
+            r#"{"schema_version":1,"regular_files_scanned":4,"groups":[{"bytes_per_file":3,"blake3":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","paths":["a.txt","copy/a.txt"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.groups[0].paths.len(), 2);
+        assert!(DuplicateReport::parse(
+            r#"{"schema_version":1,"regular_files_scanned":2,"groups":[{"bytes_per_file":3,"blake3":"not-a-digest","paths":["a.txt","b.txt"]}]}"#
+        )
+        .is_err());
+        assert!(DuplicateReport::parse(
+            r#"{"schema_version":1,"regular_files_scanned":2,"groups":[{"bytes_per_file":3,"blake3":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","paths":["a.txt"]}]}"#
+        )
+        .is_err());
     }
 
     #[test]
