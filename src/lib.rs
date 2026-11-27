@@ -2,6 +2,7 @@
 mod catalog;
 mod png_metadata;
 use localwright_core::*;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
@@ -35,6 +36,8 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Verify checksum",
         hint: "Enter sha256=HEX or blake3=HEX (64 digits), or sha512=HEX (128 digits). Optional new JSON output on match.",
     },
+    Operation { id: "manifest-create", label: "Create checksum manifest", hint: "Create a versioned SHA-256 manifest for regular files below a directory. Choose a new .json output." },
+    Operation { id: "manifest-verify", label: "Verify checksum manifest", hint: "Input a manifest JSON and enter its directory root as the parameter. Reports missing, changed and matching files without writing to them." },
     Operation {
         id: "zip-list",
         label: "List ZIP contents",
@@ -55,6 +58,8 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Create ZIP from a file",
         hint: "Compress one regular file to a new ZIP. Optionally enter a portable filename for the archive entry.",
     },
+    Operation { id: "zip-create-directory", label: "Create ZIP from directory", hint: "Compress regular files in a directory recursively into a new .zip archive. Symbolic links are skipped; empty directories and filesystem metadata are not stored." },
+    Operation { id: "zip-extract-all", label: "Extract ZIP archive", hint: "Extract regular files and directories to a new destination folder. Traversal, links, collisions, and archives beyond the documented expansion limits are rejected." },
     Operation {
         id: "duplicates",
         label: "Find duplicate candidates",
@@ -447,6 +452,246 @@ fn create_zip(input: &Path, output: &Path, parameter: &str, job: &Job) -> Result
     Ok(json!({"schema_version":1,"entry":name,"uncompressed_bytes":content.len()}))
 }
 
+fn archive_name(name: &str, is_dir: bool) -> Result<std::path::PathBuf> {
+    let body = if is_dir {
+        name.strip_suffix('/').unwrap_or(name)
+    } else {
+        name
+    };
+    if body.is_empty() || body.contains(['\\', ':', '\0']) || body.starts_with('/') {
+        return Err(Error::input("ZIP contains an unsafe path"));
+    }
+    let components = body.split('/').collect::<Vec<_>>();
+    if components.iter().any(|part| !safe_archive_component(part)) {
+        return Err(Error::input("ZIP contains an unsafe path"));
+    }
+    Ok(components.iter().collect())
+}
+
+fn safe_archive_component(part: &str) -> bool {
+    if part.is_empty()
+        || matches!(part, "." | "..")
+        || part.ends_with(['.', ' '])
+        || part
+            .chars()
+            .any(|c| c.is_control() || "<>\"|?*".contains(c))
+    {
+        return false;
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        && !(stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit())
+}
+
+fn portable_relative(path: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| Error::input("Archive path is not Unicode"))?;
+                if !safe_archive_component(part) || part.contains(['/', '\\', ':', '\0']) {
+                    return Err(Error::input("Directory contains an unsafe archive path"));
+                }
+                parts.push(part);
+            }
+            _ => return Err(Error::input("Directory contains an unsafe archive path")),
+        }
+    }
+    if parts.is_empty() {
+        return Err(Error::input("Archive path is empty"));
+    }
+    Ok(parts.join("/"))
+}
+
+fn zip_extract_all(input: &Path, output: &Path, job: &Job) -> Result<Value> {
+    const MAX_TOTAL: u64 = 128 * 1024 * 1024;
+    const MAX_ENTRY: u64 = 32 * 1024 * 1024;
+    let mut archive = open_zip(input, job)?;
+    let mut plan = Vec::with_capacity(archive.len());
+    let mut names = std::collections::HashSet::new();
+    let mut total = 0u64;
+    for index in 0..archive.len() {
+        job.check()?;
+        let member = archive
+            .by_index_raw(index)
+            .map_err(|e| Error::input(e.to_string()))?;
+        let name = member.name().map_err(|e| Error::input(e.to_string()))?;
+        let is_dir = member.is_dir();
+        if member.is_symlink()
+            || member.encrypted()
+            || member
+                .unix_mode()
+                .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))
+        {
+            return Err(Error::input(
+                "ZIP contains a link, encrypted entry, or special file",
+            ));
+        }
+        let relative = archive_name(&name, is_dir)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        if !names.insert(normalized.clone()) {
+            return Err(Error::input("ZIP contains duplicate paths"));
+        }
+        if !is_dir {
+            if member.size() > MAX_ENTRY || member.size() > MAX_TOTAL - total {
+                return Err(Error::new(ErrorKind::Limit, "ZIP expansion limit exceeded"));
+            }
+            total += member.size();
+        }
+        plan.push((index, relative, is_dir, member.size()));
+    }
+    for (_, path, is_dir, _) in &plan {
+        if !is_dir
+            && plan
+                .iter()
+                .any(|(_, other, _, _)| other.starts_with(path) && other != path)
+        {
+            return Err(Error::input("ZIP file path conflicts with a nested entry"));
+        }
+    }
+    if output.exists() || output.file_name().is_none() {
+        return Err(Error::input("Choose a new destination directory"));
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent)?;
+    let final_path = parent.join(output.file_name().expect("checked filename"));
+    if final_path.exists() {
+        return Err(Error::input("Destination already exists"));
+    }
+    fs::create_dir(&final_path)?;
+    let result = (|| -> Result<()> {
+        let mut archive = open_zip(input, job)?;
+        for (index, relative, is_dir, size) in &plan {
+            job.check()?;
+            let target = final_path.join(relative);
+            if *is_dir {
+                fs::create_dir_all(&target)?;
+                continue;
+            }
+            let parent = target
+                .parent()
+                .ok_or_else(|| Error::input("Invalid ZIP output path"))?;
+            fs::create_dir_all(parent)?;
+            let mut member = archive
+                .by_index(*index)
+                .map_err(|e| Error::input(e.to_string()))?;
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            stream_zip_entry(&mut member, *size, file, index + 1, job)?;
+        }
+        job.check()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&final_path);
+    }
+    result?;
+    Ok(
+        json!({"schema_version":1,"files":plan.iter().filter(|(_,_,directory,_)| !directory).count(),"uncompressed_bytes":total,"destination":final_path}),
+    )
+}
+
+fn zip_create_directory(input: &Path, output: &Path, job: &Job) -> Result<Value> {
+    const MAX_TOTAL: u64 = 128 * 1024 * 1024;
+    const MAX_FILE: u64 = 32 * 1024 * 1024;
+    if !output
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+    {
+        return Err(Error::input("Choose .zip output"));
+    }
+    let metadata = fs::symlink_metadata(input)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::input("Choose a non-symlink directory"));
+    }
+    let root = fs::canonicalize(input)?;
+    let rows = scan(&root, job)?;
+    if rows.len() > 4096 {
+        return Err(Error::new(
+            ErrorKind::Limit,
+            "ZIP file count limit exceeded",
+        ));
+    }
+    let mut total = 0u64;
+    for row in &rows {
+        let bytes = row["bytes"].as_u64().unwrap_or(u64::MAX);
+        if bytes > MAX_FILE || bytes > MAX_TOTAL - total {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "ZIP input size limit exceeded",
+            ));
+        }
+        total += bytes;
+        portable_relative(Path::new(row["path"].as_str().unwrap_or_default()))?;
+    }
+    write_new(output, |file| {
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let mut buffer = [0u8; 32 * 1024];
+        for row in &rows {
+            job.check()?;
+            let relative = row["path"].as_str().expect("scan reports a path");
+            let path = root.join(relative);
+            if !fs::canonicalize(&path)?.starts_with(&root) {
+                return Err(Error::input(
+                    "File escaped the archive root during creation",
+                ));
+            }
+            let before = fs::symlink_metadata(&path)?;
+            if !before.is_file()
+                || before.file_type().is_symlink()
+                || before.len() != row["bytes"].as_u64().unwrap_or_default()
+            {
+                return Err(Error::input("Directory changed during ZIP creation"));
+            }
+            let mut source = fs::File::open(&path)?;
+            writer
+                .start_file(portable_relative(Path::new(relative))?, options)
+                .map_err(|e| Error::input(e.to_string()))?;
+            let mut read = 0u64;
+            loop {
+                job.check()?;
+                let n = source.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                read += n as u64;
+                if read > before.len() {
+                    return Err(Error::input("Source grew during ZIP creation"));
+                }
+                writer.write_all(&buffer[..n])?;
+            }
+            let after = source.metadata()?;
+            if read != before.len()
+                || after.len() != before.len()
+                || before.modified()? != after.modified()?
+            {
+                return Err(Error::input("Source changed during ZIP creation"));
+            }
+        }
+        job.check()?;
+        writer.finish().map_err(|e| Error::input(e.to_string()))?;
+        Ok(())
+    })?;
+    Ok(json!({"schema_version":1,"files":rows.len(),"uncompressed_bytes":total}))
+}
+
 fn list_zip(p: &Path, job: &Job) -> Result<Value> {
     let mut archive = open_zip(p, job)?;
     let mut names_bytes = 0usize;
@@ -519,6 +764,144 @@ fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
     }
     rows.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(rows)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    schema_version: u32,
+    algorithm: String,
+    files: Vec<ManifestFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestFile {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+fn manifest_create(root: &Path, job: &Job) -> Result<Value> {
+    let rows = scan(root, job)?;
+    let mut total = 0u64;
+    let mut files = Vec::with_capacity(rows.len());
+    for row in rows {
+        job.check()?;
+        let relative = row["path"].as_str().expect("scan reports a path");
+        let relative = portable_relative(Path::new(relative))?;
+        let bytes = row["bytes"].as_u64().expect("scan reports a size");
+        total = total
+            .checked_add(bytes)
+            .filter(|&n| n <= 1024 * 1024 * 1024)
+            .ok_or_else(|| Error::new(ErrorKind::Limit, "Manifest hashing exceeds 1 GiB"))?;
+        let path = root.join(&relative);
+        if !fs::canonicalize(&path)?.starts_with(root) {
+            return Err(Error::input(
+                "File escaped the manifest root during scanning",
+            ));
+        }
+        let detail = inspect(&path, job, Some(bytes))?;
+        files.push(json!({"path":relative,"bytes":bytes,"sha256":detail["sha256"]}));
+    }
+    Ok(json!({"schema_version":1,"algorithm":"sha256","files":files}))
+}
+
+fn manifest_verify(manifest_path: &Path, root: &Path, job: &Job) -> Result<Value> {
+    if manifest_path == root || manifest_path.starts_with(root) {
+        return Err(Error::input(
+            "Keep the manifest outside the scanned directory",
+        ));
+    }
+    let manifest_meta = fs::symlink_metadata(manifest_path)?;
+    if !manifest_meta.is_file() || manifest_meta.file_type().is_symlink() {
+        return Err(Error::input("Manifest must be a regular non-symlink file"));
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&read_bounded(manifest_path, 8 * 1024 * 1024)?)?;
+    if manifest.schema_version != 1
+        || manifest.algorithm != "sha256"
+        || manifest.files.len() > 10_000
+    {
+        return Err(Error::input("Unsupported or oversized checksum manifest"));
+    }
+    let root_meta = fs::symlink_metadata(root)?;
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink() {
+        return Err(Error::input("Choose a non-symlink directory root"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0u64;
+    let mut matches = Vec::new();
+    let mut changed = Vec::new();
+    let mut missing = Vec::new();
+    for entry in &manifest.files {
+        job.check()?;
+        let relative = Path::new(&entry.path);
+        if entry.path.is_empty()
+            || relative.is_absolute()
+            || !seen.insert(entry.path.as_str())
+            || relative.components().any(|part| match part {
+                std::path::Component::Normal(name) => name
+                    .to_str()
+                    .is_none_or(|name| !safe_archive_component(name)),
+                _ => true,
+            })
+            || entry.sha256.len() != 64
+            || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(Error::input("Manifest contains an unsafe or invalid entry"));
+        }
+        total = total
+            .checked_add(entry.bytes)
+            .filter(|&n| n <= 1024 * 1024 * 1024)
+            .ok_or_else(|| Error::new(ErrorKind::Limit, "Manifest verification exceeds 1 GiB"))?;
+        let mut path = root.to_path_buf();
+        let mut unavailable = false;
+        let mut unsafe_path = false;
+        let components = relative.components().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            path.push(component.as_os_str());
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    unavailable = true;
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if meta.file_type().is_symlink()
+                || (index + 1 < components.len() && !meta.is_dir())
+                || (index + 1 == components.len() && !meta.is_file())
+            {
+                unsafe_path = true;
+                break;
+            }
+        }
+        if unavailable {
+            missing.push(entry.path.clone());
+            continue;
+        }
+        if unsafe_path {
+            changed.push(entry.path.clone());
+            continue;
+        }
+        if fs::metadata(&path)?.len() != entry.bytes {
+            changed.push(entry.path.clone());
+            continue;
+        }
+        let actual = inspect(&path, job, Some(entry.bytes))?;
+        if actual["sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(&entry.sha256))
+        {
+            matches.push(entry.path.clone());
+        } else {
+            changed.push(entry.path.clone());
+        }
+    }
+    Ok(
+        json!({"schema_version":1,"algorithm":"sha256","verified":matches.len(),"matches":matches,"changed":changed,"missing":missing}),
+    )
 }
 fn directory_usage(root: &Path, job: &Job) -> Result<Value> {
     let mut total = 0u64;
@@ -610,13 +993,75 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }
         "hex-preview" => hex_preview(&r.input, &r.parameter, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
+        "manifest-create" => {
+            if r.output.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                return Err(Error::input("Choose .json manifest output"));
+            }
+            let root_metadata = fs::symlink_metadata(&r.input)?;
+            if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+                return Err(Error::input("Choose a non-symlink directory"));
+            }
+            let root = fs::canonicalize(&r.input)?;
+            let parent = r
+                .output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let canonical_parent = fs::canonicalize(parent)?;
+            let output = canonical_parent.join(
+                r.output
+                    .file_name()
+                    .ok_or_else(|| Error::input("Manifest output filename is required"))?,
+            );
+            if output.starts_with(&root) {
+                return Err(Error::input(
+                    "Save the manifest outside the scanned directory",
+                ));
+            }
+            let manifest = manifest_create(&root, &j)?;
+            let encoded = serde_json::to_vec_pretty(&manifest)?;
+            j.check()?;
+            write_bytes(&r.output, &encoded)?;
+            return Ok(Outcome {
+                preview: serde_json::to_string_pretty(&manifest)?,
+                written: Some(r.output),
+                warnings: vec!["The SHA-256 manifest records regular file paths relative to the selected root. It does not authenticate who created the manifest.".into()],
+                ..Outcome::default()
+            });
+        }
+        "manifest-verify" => {
+            if r.parameter.trim().is_empty() {
+                return Err(Error::input("Enter the directory root for this manifest"));
+            }
+            let manifest_metadata = fs::symlink_metadata(&r.input)?;
+            if !manifest_metadata.is_file() || manifest_metadata.file_type().is_symlink() {
+                return Err(Error::input("Manifest must be a regular non-symlink file"));
+            }
+            let root_metadata = fs::symlink_metadata(Path::new(&r.parameter))?;
+            if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+                return Err(Error::input("Choose a non-symlink directory root"));
+            }
+            let root = fs::canonicalize(Path::new(&r.parameter))?;
+            let manifest = fs::canonicalize(&r.input)?;
+            manifest_verify(&manifest, &root, &j)?
+        }
         "duplicates" => duplicate_candidates(&r.input, &j)?,
         "directory-usage" => directory_usage(&r.input, &j)?,
-        "zip-create" | "zip-extract-entry" => {
+        "zip-create" | "zip-extract-entry" | "zip-create-directory" | "zip-extract-all" => {
             let (value, warning) = if r.operation == "zip-create" {
                 (
                     create_zip(&r.input, &r.output, &r.parameter, &j)?,
                     "ZIP creation preserves file contents. The archive does not carry source ownership, original timestamps or extended attributes.",
+                )
+            } else if r.operation == "zip-create-directory" {
+                (
+                    zip_create_directory(&r.input, &r.output, &j)?,
+                    "The ZIP contains regular file contents only. Symbolic links, empty directories, ownership, timestamps and extended attributes are not included.",
+                )
+            } else if r.operation == "zip-extract-all" {
+                (
+                    zip_extract_all(&r.input, &r.output, &j)?,
+                    "Extracted untrusted file bytes to a new folder. Review files before opening them; the operation does not validate their format or safety.",
                 )
             } else {
                 (

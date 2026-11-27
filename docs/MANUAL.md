@@ -15,7 +15,7 @@ To verify the bundled sample from the command line:
 cargo run --locked --no-default-features -- --cli verify tests/fixtures/abc.txt "" sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
-Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no volume catalogue, duplicate analysis, metadata sanitation, archives, encryption or backup. File metadata comparison cannot detect every concurrent modification or path race. No timestamps in report yet.
+Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no persistent volume catalogue, broad metadata sanitation, authenticated signatures, encryption or backup. Archive creation omits empty directories and filesystem metadata. A locally stored checksum manifest can be edited by anyone who can modify it.
 
 No output overwrite is allowed. No accounts, ads, telemetry or runtime downloads are intended. Do not use this unverified snapshot with valuable or hostile input. Citation and donations are voluntary.
 
@@ -24,6 +24,10 @@ Use `zip-test` to verify stored and Deflate entry data without extraction. It ac
 Use `hex-preview` with an optional `offset,length` parameter. The default is 256 bytes from offset zero. The maximum is 1,024 bytes. Prefix the offset with `0x` to enter hexadecimal. The report shows printable ASCII beside the hex values and may contain sensitive bytes.
 
 Use `zip-create` with one regular file up to 16 MiB and a new `.zip` path. Leave the parameter blank to use the input filename, or enter a portable ASCII filename for the entry. This route preserves file bytes and uses a single flat entry. Ownership, original timestamps and extended attributes are omitted.
+
+Use `zip-create-directory` with a directory and a new `.zip` path to archive up to 4,096 regular files, 32 MiB each and 128 MiB total. Symbolic links and empty directories are skipped. The operation checks source sizes and modification times while reading. Use `zip-extract-all` with a ZIP and a new destination folder. It rejects traversal, duplicate paths, links, encrypted or special files, and expansion beyond the same limits. It reserves the destination directory exclusively and creates each output file without overwriting. If extraction fails, the partial destination created by that attempt is removed. Review extracted content before opening it.
+
+Use `manifest-create` with a directory and a new JSON output outside that directory. It records a schema version, SHA-256 algorithm, relative Unicode paths, byte sizes and hashes for up to 10,000 files and 1 GiB. `manifest-verify` takes the saved manifest as Input and its root directory as Parameter. It reports matching, changed and missing files; it rejects absolute/traversal paths, duplicate paths and symlinked path components. A checksum manifest does not prove who authored it.
 
 To extract one file, first use `zip-list` and read its one-based entry number. Pass that number to `zip-extract-entry` and choose a new output file. Unsafe entry paths, symlinks, nonregular entries, CRC errors, files over 32 MiB expanded and output collisions are rejected.
 
