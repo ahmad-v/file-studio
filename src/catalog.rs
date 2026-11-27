@@ -53,6 +53,20 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
             "Catalogue database exceeds 64 MiB",
         ));
     }
+    // macOS commonly exposes temporary directories through a symlinked parent
+    // such as /var -> /private/var. SQLite NOFOLLOW applies to the path walk as
+    // well as the final component, so pass it the canonical validated path.
+    let canonical_path = fs::canonicalize(path)?;
+    let canonical_metadata = fs::symlink_metadata(&canonical_path)?;
+    if !canonical_metadata.is_file() || canonical_metadata.file_type().is_symlink() {
+        return Err(Error::input("Choose a regular, non-symlink catalogue file"));
+    }
+    if canonical_metadata.len() > MAX_CATALOG_BYTES {
+        return Err(Error::new(
+            ErrorKind::Limit,
+            "Catalogue database exceeds 64 MiB",
+        ));
+    }
     let flags = if writable {
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -62,7 +76,7 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW
     };
-    let db = Connection::open_with_flags(path, flags).map_err(sqlite_error)?;
+    let db = Connection::open_with_flags(canonical_path, flags).map_err(sqlite_error)?;
     configure(&db)?;
     db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON;")
         .map_err(sqlite_error)?;
@@ -105,18 +119,18 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
     Ok(db)
 }
 
-/// Linux device and root-directory inode identify the scanned filesystem root
-/// independently of its current mount path. Other targets deliberately report
-/// unknown identity until a portable identifier can be obtained reliably.
-fn stable_source_identity(root: &Path) -> Option<String> {
-    #[cfg(target_os = "linux")]
+/// Unix filesystem device and root-directory inode avoid treating the current
+/// mount path as identity. Other platforms use a full-rescan fallback because
+/// stable volume/file identifiers are unavailable through the pinned stable API.
+pub(super) fn stable_source_identity(root: &Path) -> Option<String> {
+    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return fs::metadata(root)
+        fs::metadata(root)
             .ok()
-            .map(|metadata| format!("linux-stdev:{}-ino:{}", metadata.dev(), metadata.ino()));
+            .map(|metadata| format!("unix-dev:{}-ino:{}", metadata.dev(), metadata.ino()))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = root;
         None
@@ -581,8 +595,8 @@ mod tests {
         let before = entries(&[("keep", 1), ("change", 2), ("remove", 3)]);
         let after = entries(&[("keep", 1), ("change", 4), ("add", 5)]);
         let delta = reconcile(
-            Some("linux-stdev:42-ino:6"),
-            Some("linux-stdev:42-ino:6"),
+            Some("unix-dev:42-ino:6"),
+            Some("unix-dev:42-ino:6"),
             &before,
             &after,
         );
@@ -590,7 +604,7 @@ mod tests {
         assert_eq!((delta.added, delta.changed, delta.removed), (1, 1, 1));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn source_identity_survives_a_different_path_to_the_same_directory() {
         let directory = tempfile::tempdir().unwrap();
@@ -610,9 +624,9 @@ mod tests {
         let before = entries(&[("old", 1)]);
         let after = entries(&[("new", 1)]);
         for (previous, current) in [
-            (Some("linux-stdev:1-ino:9"), Some("linux-stdev:2-ino:9")),
-            (None, Some("linux-stdev:2-ino:9")),
-            (Some("linux-stdev:1-ino:9"), None),
+            (Some("unix-dev:1-ino:9"), Some("unix-dev:2-ino:9")),
+            (None, Some("unix-dev:2-ino:9")),
+            (Some("unix-dev:1-ino:9"), None),
             (None, None),
         ] {
             let delta = reconcile(previous, current, &before, &after);
@@ -669,5 +683,24 @@ mod tests {
         let history = history(&path, &Job::new()).unwrap();
         assert_eq!(history["scans"][0]["comparison_mode"], "full-rescan");
         assert_eq!(history["scans"][1]["comparison_mode"], "unknown");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalogue_open_canonicalizes_symlinked_parent_but_rejects_final_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let real_parent = directory.path().join("real-parent");
+        let linked_parent = directory.path().join("linked-parent");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&real_parent).unwrap();
+        let catalogue = real_parent.join("catalogue.sqlite");
+        create(&root, &[], &catalogue, &Job::new()).unwrap();
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+
+        assert!(history(&linked_parent.join("catalogue.sqlite"), &Job::new()).is_ok());
+        let final_symlink = directory.path().join("final-link.sqlite");
+        std::os::unix::fs::symlink(&catalogue, &final_symlink).unwrap();
+        assert!(history(&final_symlink, &Job::new()).is_err());
     }
 }

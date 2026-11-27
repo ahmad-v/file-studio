@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256, Sha512};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 pub const OPERATIONS: &[Operation] = &[
     Operation {
@@ -90,7 +90,7 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Search a saved file inventory",
         hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
-    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Linux filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
+    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Unix filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation {
         id: "scan",
@@ -1292,9 +1292,20 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
 }
 
 /// Handle File Studio routes that require a native path value outside the text-only
-/// operation contract. The catalogue refresh UI keeps the selected SQLite `PathBuf`
-/// intact so valid non-Unicode paths do not need to round-trip through lossy text.
+/// operation contract. The catalogue UI keeps selected paths intact and resolves
+/// saved relative paths beneath the user-selected source folder before inspection.
 pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
+    if r.operation == "workspace-catalog-inspect" {
+        let path = resolve_catalogue_selection(&r.input, &r.parameter)?;
+        let report = inspect_report(&path, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            warnings: vec![
+                "Read-only inspection. The bounded hexadecimal sample contains original file bytes and may be sensitive.".into(),
+            ],
+            ..Outcome::default()
+        });
+    }
     if r.operation != "workspace-catalog-refresh" {
         return handle(r, j);
     }
@@ -1311,6 +1322,49 @@ pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
         ],
         ..Outcome::default()
     })
+}
+
+fn resolve_catalogue_selection(root: &Path, relative: &str) -> Result<PathBuf> {
+    if relative.is_empty() || relative.len() > 64 * 1024 {
+        return Err(Error::input("Choose a valid catalogue file path"));
+    }
+    let root_metadata = fs::symlink_metadata(root)?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(Error::input("Choose a non-symlink source folder"));
+    }
+    let root = fs::canonicalize(root)?;
+    let relative = Path::new(relative);
+    if relative.is_absolute() {
+        return Err(Error::input("Catalogue paths must be relative"));
+    }
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::input("Catalogue path contains an unsafe component"));
+    }
+
+    let mut candidate = root.clone();
+    for (index, component) in components.iter().enumerate() {
+        candidate.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&candidate)?;
+        if metadata.file_type().is_symlink()
+            || (index + 1 < components.len() && !metadata.is_dir())
+            || (index + 1 == components.len() && !metadata.is_file())
+        {
+            return Err(Error::input(
+                "Catalogue selection must contain only directories and a regular file",
+            ));
+        }
+    }
+
+    let canonical = fs::canonicalize(&candidate)?;
+    if !canonical.starts_with(&root) || !fs::metadata(&canonical)?.is_file() {
+        return Err(Error::input("Selected file escaped the source folder"));
+    }
+    Ok(canonical)
 }
 #[cfg(test)]
 mod tests {
@@ -1562,15 +1616,14 @@ mod tests {
         .unwrap();
         let refresh_report: Value = serde_json::from_str(&refreshed.preview).unwrap();
         assert_eq!(refresh_report["history"], true);
-        #[cfg(target_os = "linux")]
-        {
+        if catalog::stable_source_identity(&root).is_some() {
             assert_eq!(refresh_report["comparison_mode"], "same-source");
             assert_eq!(refresh_report["added"], 1);
             assert_eq!(refresh_report["changed"], 1);
             assert_eq!(refresh_report["removed"], 0);
+        } else {
+            assert_eq!(refresh_report["comparison_mode"], "full-rescan");
         }
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(refresh_report["comparison_mode"], "full-rescan");
         let compared = handle(
             Request {
                 operation: "catalog-compare".into(),
@@ -1615,6 +1668,74 @@ mod tests {
         let scans: Value = serde_json::from_str(&history.preview).unwrap();
         assert_eq!(scans["scans"].as_array().unwrap().len(), 2);
         assert_eq!(scans["scans"][0]["files"], 2);
+    }
+
+    #[test]
+    fn selected_catalogue_file_inspection_is_read_only_and_rejects_escape_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let outside = directory.path().join("outside.txt");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/report.txt"), b"inspect this file").unwrap();
+        fs::write(&outside, b"outside the source").unwrap();
+
+        let rows = scan(&root, &Job::new()).unwrap();
+        let saved_relative_path = rows[0]["path"].as_str().unwrap().to_owned();
+        let inspected = handle_workspace(
+            Request {
+                operation: "workspace-catalog-inspect".into(),
+                input: root.clone(),
+                parameter: saved_relative_path.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&inspected.preview).unwrap();
+        assert_eq!(report["bytes"], b"inspect this file".len() as u64);
+        assert!(report["sha256"].as_str().is_some());
+        assert!(inspected.written.is_none());
+        assert_eq!(
+            fs::read(root.join(saved_relative_path)).unwrap(),
+            b"inspect this file"
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"outside the source");
+
+        for unsafe_path in ["../outside.txt", "nested/../nested/report.txt", ""] {
+            assert!(handle_workspace(
+                Request {
+                    operation: "workspace-catalog-inspect".into(),
+                    input: root.clone(),
+                    parameter: unsafe_path.into(),
+                    ..Request::default()
+                },
+                Job::new(),
+            )
+            .is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_catalogue_file_inspection_rejects_symlink_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let outside = directory.path().join("outside.txt");
+        fs::create_dir(&root).unwrap();
+        fs::write(&outside, b"private outside content").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked.txt")).unwrap();
+
+        let result = handle_workspace(
+            Request {
+                operation: "workspace-catalog-inspect".into(),
+                input: root,
+                parameter: "linked.txt".into(),
+                ..Request::default()
+            },
+            Job::new(),
+        );
+        assert!(result.is_err());
     }
 
     #[test]

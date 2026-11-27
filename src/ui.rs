@@ -38,6 +38,7 @@ enum RequestKind {
     Search,
     History,
     Refresh,
+    InspectSelection,
     Operation,
 }
 
@@ -189,6 +190,9 @@ struct StudioUi {
     search_results: Option<SearchReport>,
     history: Vec<file_studio::catalogue_workspace::ScanSummary>,
     history_truncated: bool,
+    inspection_path: Option<String>,
+    inspection_catalogued_bytes: Option<u64>,
+    inspection_report: Option<String>,
     page_index: usize,
     selected_operation: String,
     input_path: String,
@@ -217,6 +221,7 @@ enum Message {
     Search,
     LoadHistory,
     Refresh,
+    InspectCatalogueFile(String),
     PreviousPage,
     NextPage,
     Operation(String),
@@ -269,6 +274,9 @@ impl StudioUi {
             search_results: None,
             history: Vec::new(),
             history_truncated: false,
+            inspection_path: None,
+            inspection_catalogued_bytes: None,
+            inspection_report: None,
             page_index: 0,
             selected_operation: operations
                 .first()
@@ -301,6 +309,9 @@ impl StudioUi {
                 self.catalogue_selection = None;
                 self.search_results = None;
                 self.history.clear();
+                self.inspection_path = None;
+                self.inspection_catalogued_bytes = None;
+                self.inspection_report = None;
                 self.page_index = 0;
                 self.status =
                     "Select a saved catalogue, then search paths or load its history.".into();
@@ -308,11 +319,17 @@ impl StudioUi {
             Message::RootPath(path) => {
                 self.root_path = path;
                 self.root_selection = None;
+                self.inspection_path = None;
+                self.inspection_catalogued_bytes = None;
+                self.inspection_report = None;
             }
             Message::Query(query) => {
                 self.query = query;
                 self.search_results = None;
                 self.page_index = 0;
+                self.inspection_path = None;
+                self.inspection_catalogued_bytes = None;
+                self.inspection_report = None;
             }
             Message::BrowseCatalogue => {
                 return Task::perform(
@@ -333,6 +350,9 @@ impl StudioUi {
                     self.catalogue_selection = Some(path);
                     self.search_results = None;
                     self.history.clear();
+                    self.inspection_path = None;
+                    self.inspection_catalogued_bytes = None;
+                    self.inspection_report = None;
                     return self.start_history();
                 }
             }
@@ -352,11 +372,17 @@ impl StudioUi {
                 if let Some(path) = path {
                     self.root_path = path.to_string_lossy().into_owned();
                     self.root_selection = Some(path);
+                    self.inspection_path = None;
+                    self.inspection_catalogued_bytes = None;
+                    self.inspection_report = None;
                 }
             }
             Message::Search => return self.start_search(),
             Message::LoadHistory => return self.start_history(),
             Message::Refresh => return self.start_refresh(),
+            Message::InspectCatalogueFile(relative) => {
+                return self.start_catalogue_inspection(relative)
+            }
             Message::PreviousPage => self.page_index = self.page_index.saturating_sub(1),
             Message::NextPage => {
                 if self.page_index + 1 < self.page_count() {
@@ -446,8 +472,13 @@ impl StudioUi {
                     Ok(outcome) => return self.finish_request(kind, outcome),
                     Err(error) => {
                         self.status = format!("{} failed: {}", request_title(kind), error.message);
-                        if kind == RequestKind::Operation {
-                            self.operation_preview = error.message;
+                        match kind {
+                            RequestKind::Operation => self.operation_preview = error.message,
+                            RequestKind::InspectSelection => {
+                                self.inspection_report =
+                                    Some(format!("Inspection failed: {}", error.message));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -469,6 +500,9 @@ impl StudioUi {
             self.status = "Search text must be at most 4 KiB.".into();
             return Task::none();
         }
+        self.inspection_path = None;
+        self.inspection_catalogued_bytes = None;
+        self.inspection_report = None;
         self.page_index = 0;
         let request = Request {
             operation: "catalog-search".into(),
@@ -510,6 +544,44 @@ impl StudioUi {
             ..Request::default()
         };
         self.submit(RequestKind::Refresh, request)
+    }
+
+    fn start_catalogue_inspection(&mut self, relative: String) -> Task<Message> {
+        if self.job.is_some() {
+            return Task::none();
+        }
+        if self.root_path.trim().is_empty() {
+            self.status = "Choose the source folder represented by this catalogue before inspecting a result.".into();
+            return Task::none();
+        }
+        if !self.search_results.as_ref().is_some_and(|results| {
+            results
+                .files
+                .iter()
+                .any(|entry| entry.path.as_str() == relative.as_str())
+        }) {
+            self.status = "Search again before inspecting a catalogue result.".into();
+            return Task::none();
+        }
+        self.inspection_catalogued_bytes = self
+            .search_results
+            .as_ref()
+            .and_then(|results| {
+                results
+                    .files
+                    .iter()
+                    .find(|entry| entry.path.as_str() == relative.as_str())
+            })
+            .map(|entry| entry.bytes);
+        self.inspection_path = Some(relative.clone());
+        self.inspection_report = Some("Inspection running…".into());
+        let request = Request {
+            operation: "workspace-catalog-inspect".into(),
+            input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
+            parameter: relative,
+            ..Request::default()
+        };
+        self.submit(RequestKind::InspectSelection, request)
     }
 
     fn start_operation(&mut self) -> Task<Message> {
@@ -579,6 +651,9 @@ impl StudioUi {
                 Err(error) => self.status = format!("Could not display scan history: {error}"),
             },
             RequestKind::Refresh => {
+                self.inspection_path = None;
+                self.inspection_catalogued_bytes = None;
+                self.inspection_report = None;
                 self.search_results = None;
                 self.status = match serde_json::from_str::<serde_json::Value>(&outcome.preview) {
                     Ok(report) if report["comparison_mode"] == "same-source" => format!(
@@ -591,13 +666,32 @@ impl StudioUi {
                         report["removed"].as_u64().unwrap_or_default(),
                     ),
                     Ok(report) => format!(
-                        "Saved full-rescan baseline {}: {} files. Volume identity changed or is unavailable; no cross-volume deltas were inferred. Refreshing history…",
+                        "Saved full-rescan baseline {}: {} files. Source identity changed or is unavailable; no cross-source deltas were inferred. Refreshing history…",
                         report["scan_id"].as_i64().unwrap_or_default(),
                         report["files"].as_u64().unwrap_or_default(),
                     ),
                     Err(_) => "Catalogue refresh finished; refreshing scan history…".into(),
                 };
                 return self.start_history();
+            }
+            RequestKind::InspectSelection => {
+                let current_bytes = serde_json::from_str::<serde_json::Value>(&outcome.preview)
+                    .ok()
+                    .and_then(|report| report["bytes"].as_u64());
+                let size_differs = self
+                    .inspection_catalogued_bytes
+                    .zip(current_bytes)
+                    .is_some_and(|(saved, current)| saved != current);
+                let mut preview = outcome.preview;
+                for warning in outcome.warnings {
+                    preview.push_str(&format!("\nWarning: {warning}"));
+                }
+                self.inspection_report = Some(preview);
+                self.status = if size_differs {
+                    "Read-only inspection completed; current size differs from the saved catalogue snapshot.".into()
+                } else {
+                    "Read-only inspection completed; the selected file was not modified.".into()
+                };
             }
             RequestKind::Operation => {
                 self.status = outcome.written.map_or_else(
@@ -755,10 +849,13 @@ impl StudioUi {
         .align_y(iced::Alignment::Center)
         .wrap();
         let refresh_row = row![
-            text("Refresh from folder"),
-            text_input("Folder represented by this catalogue", &self.root_path)
-                .on_input(Message::RootPath)
-                .width(Length::Fill),
+            text("Source folder"),
+            text_input(
+                "Choose this folder to refresh or inspect a saved result",
+                &self.root_path
+            )
+            .on_input(Message::RootPath)
+            .width(Length::Fill),
             button("Choose folder…").on_press(Message::BrowseRoot),
             button("Add scan snapshot").on_press_maybe(
                 (self.job.is_none()
@@ -775,7 +872,8 @@ impl StudioUi {
             text("Search results").size(20),
             row![
                 text("Relative path").width(Length::Fill),
-                text("Size").width(Length::Fixed(120.0))
+                text("Size").width(Length::Fixed(120.0)),
+                text("Action").width(Length::Fixed(90.0))
             ]
             .spacing(12),
         ]
@@ -793,6 +891,10 @@ impl StudioUi {
                             .width(Length::Fill)
                             .wrapping(text::Wrapping::WordOrGlyph),
                         text(format_bytes(entry.bytes.into())).width(Length::Fixed(120.0)),
+                        button("Inspect").on_press_maybe(
+                            (self.job.is_none() && !self.root_path.trim().is_empty())
+                                .then_some(Message::InspectCatalogueFile(entry.path.clone()))
+                        ),
                     ]
                     .spacing(12),
                 );
@@ -818,6 +920,28 @@ impl StudioUi {
         } else {
             result_table =
                 result_table.push(text("Search a saved catalogue to browse matching paths."));
+        }
+
+        let mut inspector = column![
+            text("Selected file properties, metadata and integrity").size(20),
+            text("Search uses saved catalogue data only. Choose the source folder above and click Inspect to read a matched file; this does not modify the file."),
+        ]
+        .spacing(6);
+        if let Some(path) = &self.inspection_path {
+            inspector = inspector.push(text(format!("Selected path: {}", display_path(path))));
+        }
+        if let Some(bytes) = self.inspection_catalogued_bytes {
+            inspector = inspector.push(text(format!(
+                "Saved catalogue size: {}",
+                format_bytes(bytes.into())
+            )));
+        }
+        if let Some(report) = &self.inspection_report {
+            inspector = inspector.push(
+                container(text(report).wrapping(text::Wrapping::WordOrGlyph))
+                    .padding(8)
+                    .width(Length::Fill),
+            );
         }
 
         let mut history_table = column![
@@ -878,6 +1002,7 @@ impl StudioUi {
                 search_row,
                 refresh_row,
                 result_table,
+                inspector,
                 history_table,
             ]
             .spacing(12),
@@ -959,6 +1084,7 @@ fn request_title(kind: RequestKind) -> &'static str {
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
+        RequestKind::InspectSelection => "Selected file inspection",
         RequestKind::Operation => "Operation",
     }
 }
@@ -1032,6 +1158,9 @@ mod tests {
         let _ = ui.update(Message::Refresh);
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose an existing SQLite catalogue"));
+        let _ = ui.update(Message::InspectCatalogueFile("report.txt".into()));
+        assert!(ui.job.is_none());
+        assert!(ui.status.contains("Choose the source folder"));
     }
 
     #[cfg(unix)]

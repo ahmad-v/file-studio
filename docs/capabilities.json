@@ -126,12 +126,12 @@
     },
     {
       "operation": "catalog-refresh",
-      "description": "Append an immutable scan snapshot, migrate schema v1 safely, and report path deltas only for matching Linux filesystem/root identity",
+      "description": "Append immutable scans, migrate schema v1, and report deltas for matching Unix filesystem/root identity; Windows safely uses full-rescan fallback",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"
       ],
-      "fixture_status": "Existing transactional append fixture; identity matching, mismatch fallback, and schema-v1 migration tests added but not yet executed"
+      "fixture_status": "Existing transactional append fixture; Unix identity, Windows/unknown fallback, and schema-v1 migration tests added but not yet executed"
     },
     {
       "operation": "catalog-history",
