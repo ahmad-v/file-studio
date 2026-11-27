@@ -8,7 +8,7 @@ Nothing is verified on a native target. The machine-readable registry is a devel
 | file-times | Read creation, modification and access timestamps | Linux fixture-tested |
 | png-metadata / png-strip-metadata | PNG chunk inspection and removal of text and EXIF from a copy | Linux fixture-tested |
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
-| inspect | Signature subset, SHA-256/BLAKE3; JSON | implemented-unverified |
+| inspect | Signature subset and integrity hashes for regular files; timestamps and bounded hex sample; PNG chunk counts for valid PNGs up to 32 MiB | Linux fixture-tested; other format properties unavailable |
 | catalog-search | Search a saved version 1 inventory by path text | Linux unit fixture and CLI-tested |
 | scan | Bounded directory inventory; JSON/CSV | implemented-unverified |
 | zip-extract-entry | Extract one numbered regular entry to a chosen path | Linux fixture and CLI-tested |

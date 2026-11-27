@@ -15,7 +15,7 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "inspect",
         label: "Inspect",
-        hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
+        hint: "Inspect signature, timestamps, hashes, a bounded hexadecimal sample, and supported format properties. Optional new JSON output.",
     },
     Operation {
         id: "png-metadata",
@@ -186,6 +186,80 @@ fn inspect(p: &Path, j: &Job, expected_size: Option<u64>) -> Result<Value> {
     Ok(
         json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"sha512":format!("{:x}",sha512.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
     )
+}
+
+/// Build the user-facing inspector report. The expensive hash pass remains a
+/// separate primitive because catalogue and archive workflows reuse it.
+fn inspect_report(path: &Path, job: &Job) -> Result<Value> {
+    let mut report = inspect(path, job, None)?;
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || before.file_type().is_symlink() {
+        return Err(Error::input("Expected regular non-symlink file"));
+    }
+
+    let mut file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != report["bytes"].as_u64().unwrap_or(u64::MAX) {
+        return Err(Error::input("File changed during inspection"));
+    }
+    let sample_len = usize::try_from(opened.len().min(64)).unwrap_or(64);
+    let mut sample = vec![0; sample_len];
+    file.read_exact(&mut sample)?;
+    job.check()?;
+    let after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if after.len() != opened.len()
+        || after.modified()? != opened.modified()?
+        || path_after.len() != opened.len()
+        || path_after.modified()? != opened.modified()?
+    {
+        return Err(Error::input("File changed during inspection"));
+    }
+
+    let hex = sample
+        .chunks(16)
+        .map(|row| {
+            row.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    let ascii = sample
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    let times = file_times(path)?;
+    report["timestamps"] = times;
+    report["hex_sample"] = json!({
+        "offset": 0,
+        "bytes_displayed": sample.len(),
+        "hex_rows": hex,
+        "ascii": ascii,
+    });
+
+    if report["signature"] == "image/png" {
+        let metadata = if opened.len() <= 32 * 1024 * 1024 {
+            png_metadata::process(path, None, job)
+        } else {
+            Err(Error::input(
+                "PNG exceeds the 32 MiB metadata-inspection limit",
+            ))
+        };
+        report["format_properties"] = match metadata {
+            Ok(properties) => properties,
+            Err(error) => json!({"inspection_error": error.message}),
+        };
+    } else {
+        report["format_properties"] = Value::Null;
+    }
+    Ok(report)
 }
 fn hex_preview(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
     let (offset, length) = if parameter.trim().is_empty() {
@@ -1016,7 +1090,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         });
     }
     let value = match r.operation.as_str() {
-        "inspect" => inspect(&r.input, &j, None)?,
+        "inspect" => inspect_report(&r.input, &j)?,
         "png-metadata" => png_metadata::process(&r.input, None, &j)?,
         "png-strip-metadata" => {
             let report = png_metadata::process(&r.input, Some(&r.output), &j)?;
@@ -1159,6 +1233,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         written,
         warnings: vec![if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
+        } else if r.operation == "inspect" {
+            "The hexadecimal sample contains original file bytes and may be sensitive. Signature identification is limited; PNG chunk inspection does not decode metadata values.".into()
         } else if r.operation == "duplicates" {
             "Candidates share a size and BLAKE3 checksum. Review files before making any changes."
                 .into()
@@ -1223,6 +1299,53 @@ mod tests {
         )
         .unwrap();
         assert!(fs::read_to_string(output).unwrap().contains("é.txt,3"));
+    }
+
+    #[test]
+    fn integrated_inspection_combines_integrity_timestamps_hex_and_png_properties() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.png");
+        let output = directory.path().join("inspection.json");
+        let fixture = include_bytes!("../tests/fixtures/png-metadata.png");
+        fs::write(&path, fixture).unwrap();
+
+        let outcome = handle(
+            Request {
+                operation: "inspect".into(),
+                input: path.clone(),
+                output: output.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(outcome.written, Some(output.clone()));
+        let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+        assert_eq!(report["signature"], "image/png");
+        assert_eq!(report["bytes"], fixture.len());
+        assert!(report["timestamps"]["modified_unix_ms"].is_number());
+        assert_eq!(report["hex_sample"]["offset"], 0);
+        assert_eq!(report["hex_sample"]["bytes_displayed"], 64);
+        assert_eq!(
+            report["hex_sample"]["hex_rows"][0],
+            "89 50 4e 47 0d 0a 1a 0a 00 00 00 0d 49 48 44 52"
+        );
+        assert_eq!(report["format_properties"]["removable"], 4);
+        assert_eq!(fs::read(path).unwrap(), fixture);
+    }
+
+    #[test]
+    fn integrated_inspection_handles_short_binary_files_without_expansion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.bin");
+        fs::write(&path, [0, b'A', 0x80]).unwrap();
+
+        let report = inspect_report(&path, &Job::new()).unwrap();
+        assert_eq!(report["signature"], "unknown");
+        assert_eq!(report["hex_sample"]["hex_rows"][0], "00 41 80");
+        assert_eq!(report["hex_sample"]["ascii"], ".A.");
+        assert!(report["timestamps"].is_object());
+        assert!(report["format_properties"].is_null());
     }
     #[test]
     fn lists_zip_entries_without_extracting_files() {

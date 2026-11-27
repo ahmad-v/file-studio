@@ -10,7 +10,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 | directory-usage | Logical directory size report | Linux fixture-tested |
 | png-metadata / png-strip-metadata | Inspect PNG chunks and remove text or EXIF metadata from a copy | Linux fixture and independent pixel-verified CLI |
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
-| inspect | Signature subset, SHA-256/SHA-512/BLAKE3; JSON | Linux fixture-tested |
+| inspect | Combined signature subset, size, SHA-256/SHA-512/BLAKE3, available timestamps, bounded hex sample, and verified PNG chunk counts | Linux fixture-tested; hosted matrix pending on current branch |
 | verify | SHA-256, SHA-512 or BLAKE3 against a supplied checksum; JSON on match | Linux fixture-tested |
 | zip-extract-entry | Extract one numbered regular entry to a chosen path | Linux fixture and CLI-tested |
 | zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
