@@ -8,7 +8,7 @@ This independent studio uses Localwright at source level. There is no separate m
 
 - File inspection, metadata and timestamps, bounded hexadecimal preview, SHA-256/SHA-512/BLAKE3 verification, and PNG metadata operations.
 - Directory inventories and saved-catalogue search, duplicate candidates, usage reports, versioned SHA-256 manifests, safe ZIP routes, and age file encryption.
-- SQLite catalogues retain scan history and support disconnected snapshot search. Unix refreshes compare only when the filesystem-device/root-inode identity matches; Windows and targets without stable identity use full-rescan baselines. Refreshes still traverse the complete directory.
+- SQLite catalogues retain scan history and support disconnected snapshot search. Unix refreshes compare only when filesystem-device/root-inode identity matches; Windows uses volume serial plus root-directory file index. Targets without stable identity use full-rescan baselines. Refreshes still traverse the complete directory.
 - The native Catalogue workspace opens a saved SQLite catalogue, searches and paginates paths, inspects a selected file's properties and hashes when the source folder is available, reviews recent scans, compares any two retained snapshots offline, and appends a fresh snapshot. General processing routes remain available in the Operations page.
 
 Linux fixture and CLI evidence is recorded in [status](docs/STATUS.md) and [verification](docs/VERIFICATION.md). These features are not a verified release: native device, installer lifecycle, broader metadata formats, signatures, incremental cataloguing, and some filesystem race cases remain open. Cross-target identity and GUI behavior still require hosted verification.

@@ -2,6 +2,8 @@
 
 Cargo manifests list the exact direct requirements. The committed lockfile records the resolved versions and registry checksums. Builds use Rust 1.89.0 from `rust-toolchain.toml`; this minimum is required by the bundled `rusqlite 0.43.0` persistent catalogue engine. The CI checkout action is pinned to its upstream v4.2.2 commit.
 
+The persistent catalogue uses `file-id 0.2.3` (`MIT OR Apache-2.0`) to obtain the Windows volume serial number and directory file index through its safe API. The crate uses the Win32 handle APIs internally and falls back to a full rescan whenever an identifier cannot be read. Unix catalogue identity continues to use the standard library's device and inode metadata. The ID identifies a source on one machine at a time; filesystems may reuse identifiers after deletion or reformatting.
+
 The File Studio GUI depends directly on the shared Iced version for its catalogue workspace and uses `rfd 0.15.4` with the XDG desktop portal backend for native file/folder dialogs. This keeps the dialogs native and avoids requiring GTK development libraries in Linux builds. The existing Localwright operation contracts and File Studio route handler remain the processing boundary.
 
 File encryption uses the exact direct dependency `age 0.11.5` (`MIT OR Apache-2.0`) with default features disabled. It implements the established age X25519 file format; the application does not implement cryptographic primitives. This X25519-only integration avoids enabling the upstream crate's unrelated OpenSSH and newer recipient features. The lockfile records its transitive dependency checksums. Review the generated CI license inventory and update this summary if the resolved graph changes.
