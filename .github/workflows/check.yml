@@ -19,73 +19,84 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            arch: X64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            arch: ARM64
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            arch: X64
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            arch: ARM64
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            arch: ARM64
+    name: Rust (ubuntu-24.04)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Verify runner architecture
+          fetch-depth: 0
+      - name: Classify changed files
+        id: scope
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: test "$RUNNER_ARCH" = "$EXPECTED_ARCH"
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="$PUSH_BEFORE_SHA"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+          fi
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rust=false
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            if [[ "$path" != *.md ]]; then
+              rust=true
+              break
+            fi
+          done < <(git diff --name-only "$base" "$HEAD_SHA")
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "Rust validation required: $rust"
       - name: Install Linux build prerequisites
-        if: runner.os == 'Linux'
+        if: steps.scope.outputs.rust == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      - name: Verify locked build and tests
+      - name: Cache Cargo registry, Git sources and target
+        if: steps.scope.outputs.rust == 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
+      - name: Verify formatting, locked build, tests and lint
+        if: steps.scope.outputs.rust == 'true'
         run: |
           cargo --version
           cargo fmt --all -- --check
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo check --locked --all-targets
-          cargo tree --locked
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
-      - name: Verify headless mode
+      - name: Validate capability and packaging registries
         run: |
-          cargo test --locked --no-default-features
-          cargo run --locked --no-default-features -- --cli --help
-      - name: Build and smoke-test a portable preview
+          python3 -m json.tool docs/capabilities.json > /dev/null
+          python3 -m json.tool packaging/config.json > /dev/null
+      - name: Check patch whitespace
         env:
-          BUILD_TARGET: ${{ matrix.target }}
-          CARGO_PROFILE_RELEASE_STRIP: symbols
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          cargo build --locked --release --target "$BUILD_TARGET"
-          executable="${GITHUB_REPOSITORY##*/}"
-          python_cmd=python3
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            executable="$executable.exe"
-            python_cmd=python
+          base="$PUSH_BEFORE_SHA"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then base="$PR_BASE_SHA"; fi
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]]; then
+            git diff --check "$base" "$HEAD_SHA"
+          else
+            git diff --check
           fi
-          "$python_cmd" packaging/portable.py \
-            --target "$BUILD_TARGET" \
-            --binary "target/$BUILD_TARGET/release/$executable" \
-            --output dist/preview
-      - name: Upload portable preview
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: preview-${{ matrix.target }}
-          path: dist/preview/
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0

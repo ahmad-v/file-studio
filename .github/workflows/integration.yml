@@ -1,0 +1,60 @@
+name: Integration
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'integration')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install GUI and virtual display prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev xvfb
+      - name: Cache Cargo registry, Git sources and target
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-integration-default-headless-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-integration-default-headless-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
+      - name: Verify default GUI tests and strict lint
+        run: |
+          cargo check --locked --all-targets
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Verify headless mode and CLI entry point
+        run: |
+          cargo test --locked --no-default-features
+          cargo clippy --locked --all-targets --no-default-features -- -D warnings
+          cargo run --locked --no-default-features -- --cli --help
+      - name: Smoke-test native window launch
+        run: |
+          set +e
+          timeout 15s xvfb-run -a cargo run --locked --bin file-studio
+          result=$?
+          set -e
+          if [[ "$result" -ne 0 && "$result" -ne 124 ]]; then
+            exit "$result"
+          fi
