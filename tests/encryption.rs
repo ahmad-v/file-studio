@@ -13,6 +13,18 @@ fn request(operation: &str, input: PathBuf, output: PathBuf, parameter: &str) ->
     }
 }
 
+fn test_tempdir() -> tempfile::TempDir {
+    #[cfg(windows)]
+    {
+        let profile = std::env::var_os("USERPROFILE").expect("Windows user profile is set");
+        tempfile::tempdir_in(profile).unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn create_identity(directory: &std::path::Path, name: &str) -> (PathBuf, String) {
     let identity_path = directory.join(name);
     let outcome = handle(
@@ -48,7 +60,7 @@ fn age_keys_encrypts_and_decrypts_binary_streams() {
     assert!(OPERATIONS
         .iter()
         .any(|operation| operation.id == "age-decrypt"));
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_tempdir();
     let (identity, recipient) = create_identity(directory.path(), "identity.txt");
     let input = directory.path().join("input.bin");
     let encrypted = directory.path().join("input.age");
@@ -104,7 +116,7 @@ fn age_keys_encrypts_and_decrypts_binary_streams() {
 
 #[test]
 fn wrong_identity_and_modified_ciphertext_never_publish_plaintext() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_tempdir();
     let (first_identity, first_recipient) = create_identity(directory.path(), "first.txt");
     let (second_identity, _) = create_identity(directory.path(), "second.txt");
     let input = directory.path().join("input.txt");
@@ -149,7 +161,7 @@ fn wrong_identity_and_modified_ciphertext_never_publish_plaintext() {
 
 #[test]
 fn age_outputs_never_overwrite_existing_files() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_tempdir();
     let (_, recipient) = create_identity(directory.path(), "identity.txt");
     let input = directory.path().join("input.txt");
     let output = directory.path().join("existing.age");
@@ -166,7 +178,7 @@ fn age_outputs_never_overwrite_existing_files() {
 
 #[test]
 fn cancelled_age_job_does_not_create_an_output() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_tempdir();
     let (_, recipient) = create_identity(directory.path(), "identity.txt");
     let input = directory.path().join("input.txt");
     let output = directory.path().join("cancelled.age");
@@ -187,7 +199,7 @@ fn identity_files_with_broad_unix_permissions_are_refused() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_tempdir();
         let (identity, _) = create_identity(directory.path(), "identity.txt");
         fs::set_permissions(&identity, fs::Permissions::from_mode(0o644)).unwrap();
         let input = directory.path().join("input.age");
@@ -212,7 +224,7 @@ fn identity_files_with_broad_unix_permissions_are_refused() {
 #[test]
 fn symlinked_encryption_input_is_rejected() {
     use std::os::unix::fs::symlink;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_tempdir();
     let real = directory.path().join("real.txt");
     let link = directory.path().join("linked.txt");
     let (_, recipient) = create_identity(directory.path(), "identity.txt");

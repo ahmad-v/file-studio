@@ -18,6 +18,7 @@ const MAX_ENCRYPTED_OVERHEAD: u64 = 2 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 
 pub fn generate_key(output: &Path) -> Result<Value> {
+    ensure_private_output_parent(output)?;
     let identity = x25519::Identity::generate();
     let secret = identity.to_string();
     // Keep the private text in age's zeroizing secret-string wrapper until it is
@@ -77,6 +78,7 @@ pub fn encrypt(input: &Path, output: &Path, recipient_text: &str, job: &Job) -> 
 }
 
 pub fn decrypt(input: &Path, output: &Path, identity_path: &Path, job: &Job) -> Result<Value> {
+    ensure_private_output_parent(output)?;
     let identity = load_identity(identity_path)?;
     let (mut source, before) = open_regular(input)?;
     let source_guard = source.try_clone()?;
@@ -139,6 +141,29 @@ fn open_regular(path: &Path) -> Result<(File, Metadata)> {
         return Err(Error::input("Input changed while it was being opened"));
     }
     Ok((file, opened))
+}
+
+#[cfg(windows)]
+fn ensure_private_output_parent(path: &Path) -> Result<()> {
+    let profile = std::env::var_os("USERPROFILE")
+        .ok_or_else(|| Error::input("Cannot locate the Windows user profile for private output"))?;
+    let profile = fs::canonicalize(profile)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent)?;
+    if !parent.starts_with(profile) {
+        return Err(Error::input(
+            "Save identity and decrypted output files inside your Windows user profile",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn ensure_private_output_parent(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn finish_source(file: &File, before: &Metadata, total: u64) -> Result<()> {
