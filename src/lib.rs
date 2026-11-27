@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 mod catalog;
+pub mod catalogue_workspace;
 mod encryption;
 mod png_metadata;
 use localwright_core::*;
@@ -1286,6 +1287,28 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         ..Outcome::default()
     })
 }
+
+/// Handle File Studio routes that require a native path value outside the text-only
+/// operation contract. The catalogue refresh UI keeps the selected SQLite `PathBuf`
+/// intact so valid non-Unicode paths do not need to round-trip through lossy text.
+pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
+    if r.operation != "workspace-catalog-refresh" {
+        return handle(r, j);
+    }
+    if r.output.as_os_str().is_empty() {
+        return Err(Error::input("Choose an existing SQLite catalogue"));
+    }
+    let files = scan(&r.input, &j)?;
+    let report = catalog::refresh(&r.output, &r.input, &files, &j)?;
+    Ok(Outcome {
+        preview: serde_json::to_string_pretty(&report)?,
+        written: Some(r.output),
+        warnings: vec![
+            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available.".into(),
+        ],
+        ..Outcome::default()
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,6 +1630,63 @@ mod tests {
         let rows = scan(&root, &Job::new()).unwrap();
         assert!(catalog::create(&root, &rows, &inside, &Job::new()).is_err());
         assert!(!inside.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_catalogue_refresh_keeps_non_unicode_selected_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory
+            .path()
+            .join(std::ffi::OsString::from_vec(b"source-\xff".to_vec()));
+        let database = directory.path().join(std::ffi::OsString::from_vec(
+            b"catalogue-\xff.sqlite".to_vec(),
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), b"original").unwrap();
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let refreshed = handle_workspace(
+            Request {
+                operation: "workspace-catalog-refresh".into(),
+                input: root,
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&refreshed.preview).unwrap()["scan_id"],
+            2
+        );
+        let history = handle(
+            Request {
+                operation: "catalog-history".into(),
+                input: database,
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&history.preview).unwrap()["scans"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

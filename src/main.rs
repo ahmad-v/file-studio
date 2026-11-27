@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+#[cfg(feature = "gui")]
+mod ui;
+
 fn main() {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().map(String::as_str) == Some("--cli") {
@@ -10,12 +13,7 @@ fn main() {
         return;
     }
     #[cfg(feature = "gui")]
-    if let Err(e) = localwright_ui::run_with_saved_appearance(
-        "File Studio",
-        "file-studio",
-        file_studio::OPERATIONS,
-        file_studio::handle,
-    ) {
+    if let Err(e) = ui::run_app(file_studio::OPERATIONS, file_studio::handle_workspace) {
         eprintln!("{e}");
         std::process::exit(1);
     }
