@@ -39,7 +39,7 @@ jobs:
             cargo install --locked --version 0.23.0 cargo-audit
           fi
       - name: Audit locked dependencies against current RustSec advisories
-        run: cargo audit --locked
+        run: cargo audit --file Cargo.lock
 
   sbom-and-license-inventory:
     name: CycloneDX SBOM and license inventory
