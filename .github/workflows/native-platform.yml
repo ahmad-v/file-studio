@@ -61,9 +61,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.89-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.89-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
       - name: Verify locked default-feature build and tests
         run: |
           cargo --version

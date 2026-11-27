@@ -70,9 +70,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust1.89-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-rust1.88-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust1.89-default-gui-dev-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
       - name: Verify formatting, locked build, tests and lint
         if: steps.scope.outputs.rust == 'true'
         run: |

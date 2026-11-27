@@ -1,16 +1,18 @@
 # Format and operation compatibility
 
-Nothing is verified on a native target. The machine-readable registry is a development inventory, not an advertised capability list.
+No capability is marked device-verified or released. Previous hosted jobs passed Linux and Windows targets; the current SQLite catalogue head awaits its native matrix. The machine-readable registry is a development inventory, not an advertised capability list.
 
 | Operation | Route | Evidence status |
 |---|---|---|
-| catalog-compare | Compare paths and sizes in saved inventories | Linux fixture-tested |
+| catalog-compare | Compare JSON inventories or latest SQLite catalogue snapshots by path and size | Linux fixture-tested |
+| catalog-history | Read the latest 100 SQLite scan snapshots without accessing original paths | Linux integration fixture-tested |
+| catalog-refresh | Append a full bounded scan snapshot to versioned SQLite history | Linux integration fixture-tested |
 | file-times | Read creation, modification and access timestamps | Linux fixture-tested |
 | png-metadata / png-strip-metadata | PNG chunk inspection and removal of text and EXIF from a copy | Linux fixture-tested |
 | hex-preview | Bounded offset window with hex and printable ASCII | Linux fixture and CLI-tested |
 | inspect | Signature subset and integrity hashes for regular files; timestamps and bounded hex sample; PNG chunk counts for valid PNGs up to 32 MiB | Linux fixture-tested; other format properties unavailable |
-| catalog-search | Search a saved version 1 inventory by path text | Linux unit fixture and CLI-tested |
-| scan | Bounded directory inventory; JSON/CSV | implemented-unverified |
+| catalog-search | Search JSON inventory or versioned SQLite catalogue by path text | Linux unit fixture and CLI-tested |
+| scan | Bounded directory inventory; JSON, CSV or a new SQLite snapshot | Linux integration fixture-tested |
 | zip-extract-entry | Extract one numbered regular entry to a chosen path | Linux fixture and CLI-tested |
 | zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
 | zip-create-directory | Regular files in a directory tree to Deflate ZIP; empty directories and filesystem metadata omitted | Linux round-trip fixture-tested |

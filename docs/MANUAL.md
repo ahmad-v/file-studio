@@ -9,7 +9,7 @@ Development source only. Launch the GUI after compiling. Choose an operation, en
 - `age-keygen` creates a new age X25519 identity file at the chosen output path and displays its public recipient key. The saved file is private key material and has no passphrase protection. On Unix it is written with owner-only permissions. On Windows, identity files must be saved under your user profile and inherit that directory's access controls. Keep a secure backup and do not share the identity file.
 - `age-encrypt` encrypts a regular file to the age X25519 public recipient key in Parameter and writes a new `.age` file. `age-decrypt` reads a regular age file and writes decrypted bytes to a new output path; enter the identity file path in Parameter. Both routes stream up to 4 GiB. On Windows, decrypted output must be saved under your user profile. Decryption publishes output only after the age stream authenticates successfully. Wrong keys, tampering, and collisions create no output.
 - `zip-list`: List ZIP entries and declared sizes. Optional new JSON output. Member data is never expanded.
-- `scan`: Bounded directory inventory; JSON/CSV.
+- `scan`: Bounded directory inventory; choose a new JSON, CSV or `.sqlite` output. A SQLite catalogue stores a local version 1 snapshot.
 
 To verify the bundled sample from the command line:
 
@@ -17,7 +17,7 @@ To verify the bundled sample from the command line:
 cargo run --locked --no-default-features -- --cli verify tests/fixtures/abc.txt "" sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
-Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. The integrated inspector provides format-specific properties only for bounded PNG chunk structure; timestamps can be unavailable, and its hex sample contains original bytes that may be sensitive. Age encryption does not prove who sent a file, and the generated identity is not passphrase-protected. The app does not yet create or verify digital signatures. Scanning aborts on unreadable entries; no persistent volume catalogue, broad metadata sanitation or backup. Archive creation omits empty directories and filesystem metadata. A locally stored checksum manifest can be edited by anyone who can modify it.
+Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. The integrated inspector provides format-specific properties only for bounded PNG chunk structure; timestamps can be unavailable, and its hex sample contains original bytes that may be sensitive. Age encryption does not prove who sent a file, and the generated identity is not passphrase-protected. The app does not yet create or verify digital signatures. Scanning aborts on unreadable entries; the catalogue is a local snapshot rather than a stable volume-identity service, and rescans do a complete traversal instead of using filesystem change journals. Broad metadata sanitation and backup are not available. Archive creation omits empty directories and filesystem metadata. A locally stored checksum manifest can be edited by anyone who can modify it.
 
 No output overwrite is allowed. No accounts, ads, telemetry or runtime downloads are intended. Do not use this unverified snapshot with valuable or hostile input. Citation and donations are voluntary.
 
@@ -35,9 +35,11 @@ To extract one file, first use `zip-list` and read its one-based entry number. P
 
 Use `png-metadata` to count chunk types and identify removable metadata without reading tag values. Use `png-strip-metadata` with a new `.png` output to omit `tEXt`, `zTXt`, `iTXt`, and `eXIf` chunks. The report shows counts before and after. Image data and chunks such as ICC profiles remain. Treat the output as a selective metadata cleanup and review its contents before sharing.
 
-To search while a source drive is unavailable, save a scan as JSON. Later use `catalog-search` with the saved inventory as Input and a path fragment as Parameter. Search matches Unicode-lowercased text and does not access the paths. A new JSON output is optional. Results reflect the original scan and may contain sensitive filenames.
+To create a persistent catalogue, use `scan` with a new `.sqlite` output outside the scanned directory tree. The database records schema version, scan timestamp, a root label, relative paths and file sizes. It does not store full root paths or a stable hardware volume identifier. `catalog-refresh` takes the directory as Input and an existing catalogue path as Parameter; it appends a complete snapshot transactionally and preserves earlier history. `catalog-history` lists the latest 100 scans. `catalog-search` accepts JSON or SQLite inventories and searches the saved paths without opening the original volume. `catalog-compare` accepts either format for each inventory. A refresh traverses the full directory and is not an incremental filesystem update. Catalogues include filenames and are private local data; treat them as sensitive. Database inputs are size-bounded and read-only during search.
 
 ## Additional operations
 
-- `catalog-compare`. Open the earlier catalog JSON and enter the later catalog path. The report lists added, removed, and size-changed paths. A same-size match can still have different contents.
+- `catalog-compare`. Open an earlier JSON or SQLite catalogue and enter a later inventory path of either format. The report lists added, removed, and size-changed paths. A same-size match can still have different contents.
+- `catalog-refresh`. Input a directory and enter an existing `.sqlite` catalogue path as Parameter. Adds a new complete scan snapshot; prior records remain intact.
+- `catalog-history`. Input a `.sqlite` catalogue to inspect its latest 100 snapshots without accessing the scanned paths.
 - `file-times`. Open a regular file. Times are reported in Unix epoch milliseconds. Unavailable timestamps appear as null.

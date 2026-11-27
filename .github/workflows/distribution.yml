@@ -58,9 +58,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.88-default-gui-release-strip-symbols-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.89-default-gui-release-strip-symbols-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.88-default-gui-release-strip-symbols-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-rust1.89-default-gui-release-strip-symbols-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml') }}-
       - name: Build locked optimized binary
         env:
           BUILD_TARGET: ${{ matrix.target }}

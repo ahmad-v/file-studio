@@ -77,7 +77,7 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "catalog-compare",
         label: "Compare saved inventories",
-        hint: "Input the earlier scan JSON and enter the newer scan path. Optional new JSON report.",
+        hint: "Input the earlier JSON inventory or SQLite catalogue and enter the later inventory path. Optional new JSON report.",
     },
     Operation {
         id: "file-times",
@@ -87,12 +87,14 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "catalog-search",
         label: "Search a saved file inventory",
-        hint: "Input a scan JSON and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
+        hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
+    Operation { id: "catalog-refresh", label: "Add catalogue scan history", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a versioned snapshot without deleting prior scans; keep the catalogue outside the scanned tree." },
+    Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation {
         id: "scan",
         label: "Scan",
-        hint: "Read-only recursive directory inventory. Output new JSON or CSV; symbolic links are skipped.",
+        hint: "Read-only recursive directory inventory. Output new JSON, CSV or .sqlite catalogue; symbolic links are skipped.",
     },
 ];
 fn identify(b: &[u8]) -> &'static str {
@@ -1191,11 +1193,16 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "file-times" => file_times(&r.input)?,
         "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
         "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
+        "catalog-history" => catalog::history(&r.input, &j)?,
+        "catalog-refresh" => {
+            let files = scan(&r.input, &j)?;
+            catalog::refresh(Path::new(&r.parameter), &r.input, &files, &j)?
+        }
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
     };
     let mut written = None;
-    let encoded = serde_json::to_string_pretty(&value)?;
+    let mut encoded = serde_json::to_string_pretty(&value)?;
     if !r.output.as_os_str().is_empty() {
         j.check()?;
         match r.output.extension().and_then(|s| s.to_str()) {
@@ -1215,7 +1222,20 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 w.flush()?;
                 Ok(())
             })?,
-            _ if r.operation == "scan" => return Err(Error::input("Choose .json or .csv")),
+            Some(extension)
+                if r.operation == "scan"
+                    && (extension.eq_ignore_ascii_case("sqlite")
+                        || extension.eq_ignore_ascii_case("sqlite3")) =>
+            {
+                let files = value["files"]
+                    .as_array()
+                    .ok_or_else(|| Error::input("Scan report has no file list"))?;
+                let report = catalog::create(&r.input, files, &r.output, &j)?;
+                encoded = serde_json::to_string_pretty(&report)?;
+            }
+            _ if r.operation == "scan" => {
+                return Err(Error::input("Choose .json, .csv or .sqlite output"))
+            }
             _ => return Err(Error::input("Choose .json output")),
         };
         written = Some(r.output);
@@ -1247,6 +1267,10 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             "Timestamps are milliseconds since the Unix epoch. Unavailable timestamps appear as null.".into()
         } else if r.operation == "catalog-search" {
             "Results describe the saved scan. Files may have moved or changed. The source drive is not accessed.".into()
+        } else if r.operation == "catalog-refresh" {
+            "A new scan snapshot was appended in one SQLite transaction. Older history remains available; the source scan is read-only.".into()
+        } else if r.operation == "catalog-history" {
+            "History comes from the local catalogue only. Original volumes and listed paths are not opened.".into()
         } else if r.operation == "png-metadata" {
             "Reports PNG chunk types and counts without decoding image pixels or metadata values."
                 .into()
@@ -1456,6 +1480,133 @@ mod tests {
             report["files"][0],
             json!({"path":"Café Notes.txt","bytes":3})
         );
+    }
+
+    #[test]
+    fn sqlite_catalog_searches_offline_and_retains_append_only_scan_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("removable-volume");
+        let database = directory.path().join("volume.sqlite");
+        let earlier = directory.path().join("earlier.json");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("report.txt"), b"first").unwrap();
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert!(handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .is_err());
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: earlier.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        fs::write(root.join("report.txt"), b"changed-size").unwrap();
+        fs::write(root.join("notes.txt"), b"new").unwrap();
+        let refreshed = handle(
+            Request {
+                operation: "catalog-refresh".into(),
+                input: root.clone(),
+                parameter: database.to_string_lossy().into_owned(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&refreshed.preview).unwrap()["history"],
+            true
+        );
+        let compared = handle(
+            Request {
+                operation: "catalog-compare".into(),
+                input: earlier.clone(),
+                parameter: database.to_string_lossy().into_owned(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let comparison: Value = serde_json::from_str(&compared.preview).unwrap();
+        assert_eq!(comparison["added"][0]["path"], "notes.txt");
+        assert_eq!(comparison["size_changed"][0]["path"], "report.txt");
+
+        fs::remove_file(root.join("report.txt")).unwrap();
+        fs::remove_file(root.join("notes.txt")).unwrap();
+        fs::remove_dir(root).unwrap();
+        let searched = handle(
+            Request {
+                operation: "catalog-search".into(),
+                input: database.clone(),
+                parameter: "NOTES".into(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let results: Value = serde_json::from_str(&searched.preview).unwrap();
+        assert_eq!(results["catalogued_files"], 2);
+        assert_eq!(results["matched_files"], 1);
+        assert_eq!(results["files"][0]["path"], "notes.txt");
+
+        let history = handle(
+            Request {
+                operation: "catalog-history".into(),
+                input: database,
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let scans: Value = serde_json::from_str(&history.preview).unwrap();
+        assert_eq!(scans["scans"].as_array().unwrap().len(), 2);
+        assert_eq!(scans["scans"][0]["files"], 2);
+    }
+
+    #[test]
+    fn sqlite_catalog_rejects_wrong_schema_and_catalogue_inside_scanned_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let wrong_schema = directory.path().join("wrong.sqlite");
+        let wrong_page_size = directory.path().join("large-pages.sqlite");
+        fs::create_dir(&root).unwrap();
+        let db = rusqlite::Connection::open(&wrong_schema).unwrap();
+        db.execute_batch("PRAGMA application_id=123; PRAGMA user_version=1;")
+            .unwrap();
+        drop(db);
+        assert!(catalog::history(&wrong_schema, &Job::new()).is_err());
+        let db = rusqlite::Connection::open(&wrong_page_size).unwrap();
+        db.execute_batch(
+            "PRAGMA page_size=8192; PRAGMA application_id=1280791107; PRAGMA user_version=1;",
+        )
+        .unwrap();
+        drop(db);
+        assert!(catalog::history(&wrong_page_size, &Job::new()).is_err());
+        let inside = root.join("catalog.sqlite");
+        let rows = scan(&root, &Job::new()).unwrap();
+        assert!(catalog::create(&root, &rows, &inside, &Job::new()).is_err());
+        assert!(!inside.exists());
     }
 
     #[test]
