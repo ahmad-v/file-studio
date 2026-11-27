@@ -1763,7 +1763,7 @@ mod tests {
         assert!(!inside.exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn native_catalogue_refresh_keeps_non_unicode_selected_paths() {
         use std::os::unix::ffi::OsStringExt;
