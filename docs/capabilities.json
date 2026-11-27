@@ -143,6 +143,15 @@
       "fixture_status": "Linux integration fixture verified two retained scan records without source access"
     },
     {
+      "operation": "catalog-compare-snapshots",
+      "description": "Compare two retained SQLite catalogue snapshots without accessing their source volume; include stable source identity match status",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Targeted offline snapshot integration fixture passed locally"
+    },
+    {
       "operation": "scan",
       "description": "Bounded directory inventory; JSON, CSV or versioned SQLite snapshot",
       "status": "implemented-unverified",

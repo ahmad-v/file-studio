@@ -481,6 +481,120 @@ pub fn history(path: &Path, job: &Job) -> Result<Value> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SnapshotComparisonRequest {
+    before_scan_id: i64,
+    after_scan_id: i64,
+}
+
+/// Compare two retained catalogue snapshots without touching the source volume.
+/// The result reports whether the snapshots share a stable source identity so
+/// callers can distinguish path deltas from comparisons across unrelated media.
+pub fn compare_snapshots(catalog: &Path, parameter: &str, job: &Job) -> Result<Value> {
+    if parameter.len() > 4096 {
+        return Err(Error::new(
+            ErrorKind::Limit,
+            "Comparison options exceed 4 KiB",
+        ));
+    }
+    let request: SnapshotComparisonRequest = serde_json::from_str(parameter)?;
+    if request.before_scan_id < 1
+        || request.after_scan_id < 1
+        || request.before_scan_id == request.after_scan_id
+    {
+        return Err(Error::input("Choose two different positive scan IDs"));
+    }
+    let db = open_catalog(catalog, false)?;
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(sqlite_error)?;
+    let query = if version >= 2 {
+        "SELECT source_id, root_label, scanned_unix_ms FROM scans WHERE id=?1"
+    } else {
+        "SELECT NULL, root_label, scanned_unix_ms FROM scans WHERE id=?1"
+    };
+    let read_scan = |scan_id: i64| -> Result<(Option<String>, String, i64)> {
+        db.query_row(query, [scan_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .map_err(sqlite_error)?
+        .ok_or_else(|| Error::input(format!("Catalogue scan {scan_id} does not exist")))
+    };
+    let (before_source, before_label, before_time) = read_scan(request.before_scan_id)?;
+    let (after_source, after_label, after_time) = read_scan(request.after_scan_id)?;
+    let before = indexed_scan(&db, request.before_scan_id, job)?;
+    let after = indexed_scan(&db, request.after_scan_id, job)?;
+    let source_identity_matches = before_source
+        .as_deref()
+        .zip(after_source.as_deref())
+        .is_some_and(|(before, after)| before == after);
+    let mut remaining = before;
+    let mut added = Vec::new();
+    let mut size_changed = Vec::new();
+    let mut same_size = 0usize;
+    for (path, bytes) in after {
+        job.check()?;
+        match remaining.remove(&path) {
+            None => added.push(json!({"path": path, "bytes": bytes})),
+            Some(previous) if previous != bytes => size_changed.push(json!({
+                "path": path,
+                "before_bytes": previous,
+                "after_bytes": bytes,
+            })),
+            Some(_) => same_size += 1,
+        }
+    }
+    let removed = remaining
+        .into_iter()
+        .map(|(path, bytes)| json!({"path": path, "bytes": bytes}))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": 1,
+        "before_scan_id": request.before_scan_id,
+        "after_scan_id": request.after_scan_id,
+        "before_root_label": before_label,
+        "after_root_label": after_label,
+        "before_scanned_unix_ms": before_time,
+        "after_scanned_unix_ms": after_time,
+        "source_identity_matches": source_identity_matches,
+        "added": added,
+        "removed": removed,
+        "size_changed": size_changed,
+        "same_size": same_size,
+    }))
+}
+
+fn indexed_scan(db: &Connection, scan_id: i64, job: &Job) -> Result<BTreeMap<String, u64>> {
+    let mut statement = db
+        .prepare("SELECT path, bytes FROM files WHERE scan_id=?1 ORDER BY path")
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([scan_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_error)?;
+    let mut result = BTreeMap::new();
+    for row in rows {
+        job.check()?;
+        let (path, bytes) = row.map_err(sqlite_error)?;
+        let bytes = bytes
+            .parse::<u64>()
+            .map_err(|_| Error::input("Catalogue contains an invalid file size"))?;
+        if path.is_empty() || path.contains('\0') || result.insert(path, bytes).is_some() {
+            return Err(Error::input("Catalogue snapshot contains an invalid path"));
+        }
+        if result.len() > 10_000 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "Catalogue scan exceeds 10,000 files",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Inventory {
     schema_version: u32,
     files: Vec<Entry>,
@@ -709,6 +823,61 @@ mod tests {
         let history = history(&path, &Job::new()).unwrap();
         assert_eq!(history["scans"][0]["comparison_mode"], "full-rescan");
         assert_eq!(history["scans"][1]["comparison_mode"], "unknown");
+    }
+
+    #[test]
+    fn compares_selected_saved_snapshots_without_accessing_source_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let catalogue = directory.path().join("history.sqlite");
+        create(
+            &root,
+            &[
+                json!({"path":"keep.txt","bytes":4}),
+                json!({"path":"change.txt","bytes":2}),
+                json!({"path":"remove.txt","bytes":3}),
+            ],
+            &catalogue,
+            &Job::new(),
+        )
+        .unwrap();
+        refresh(
+            &catalogue,
+            &root,
+            &[
+                json!({"path":"keep.txt","bytes":4}),
+                json!({"path":"change.txt","bytes":8}),
+                json!({"path":"add.txt","bytes":5}),
+            ],
+            &Job::new(),
+        )
+        .unwrap();
+
+        let report = compare_snapshots(
+            &catalogue,
+            r#"{"before_scan_id":1,"after_scan_id":2}"#,
+            &Job::new(),
+        )
+        .unwrap();
+        assert_eq!(report["source_identity_matches"], true);
+        assert_eq!(report["added"][0]["path"], "add.txt");
+        assert_eq!(report["removed"][0]["path"], "remove.txt");
+        assert_eq!(report["size_changed"][0]["path"], "change.txt");
+        assert_eq!(report["same_size"], 1);
+
+        assert!(compare_snapshots(
+            &catalogue,
+            r#"{"before_scan_id":1,"after_scan_id":1}"#,
+            &Job::new(),
+        )
+        .is_err());
+        assert!(compare_snapshots(
+            &catalogue,
+            r#"{"before_scan_id":1,"after_scan_id":99}"#,
+            &Job::new(),
+        )
+        .is_err());
     }
 
     #[cfg(unix)]

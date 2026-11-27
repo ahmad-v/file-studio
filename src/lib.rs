@@ -92,6 +92,7 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Unix filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
+    Operation { id: "catalog-compare-snapshots", label: "Compare catalogue snapshots", hint: "Input a saved File Studio .sqlite catalogue. Parameter JSON: {\"before_scan_id\":1,\"after_scan_id\":2}. Compares two retained snapshots without accessing the source volume." },
     Operation {
         id: "scan",
         label: "Scan",
@@ -1198,6 +1199,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
         "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
         "catalog-history" => catalog::history(&r.input, &j)?,
+        "catalog-compare-snapshots" => catalog::compare_snapshots(&r.input, &r.parameter, &j)?,
         "catalog-refresh" => {
             let files = scan(&r.input, &j)?;
             catalog::refresh(Path::new(&r.parameter), &r.input, &files, &j)?
@@ -1275,6 +1277,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             "A new scan snapshot was appended in one SQLite transaction. Older history remains available; the source scan is read-only.".into()
         } else if r.operation == "catalog-history" {
             "History comes from the local catalogue only. Original volumes and listed paths are not opened.".into()
+        } else if r.operation == "catalog-compare-snapshots" {
+            "Comparison uses saved relative paths and file sizes only. Source identity is reported; same-size content changes cannot be detected. The original volume is not accessed.".into()
         } else if r.operation == "png-metadata" {
             "Reports PNG chunk types and counts without decoding image pixels or metadata values."
                 .into()
