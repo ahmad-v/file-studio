@@ -27,6 +27,14 @@ fn selected_or_typed(selected: Option<&PathBuf>, typed: &str) -> PathBuf {
     selected.cloned().unwrap_or_else(|| PathBuf::from(typed))
 }
 
+fn is_sqlite_catalogue_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("sqlite") || extension.eq_ignore_ascii_case("sqlite3")
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
     Catalogue,
@@ -35,6 +43,7 @@ enum Page {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestKind {
+    CreateCatalogue,
     Search,
     History,
     Refresh,
@@ -50,7 +59,7 @@ struct ProgressPresentation {
 
 fn progress_presentation(kind: RequestKind, fraction: Option<f32>) -> ProgressPresentation {
     match (kind, fraction) {
-        (RequestKind::Refresh, None) => ProgressPresentation {
+        (RequestKind::Refresh | RequestKind::CreateCatalogue, None) => ProgressPresentation {
             label: "Scanning folder; progress is indeterminate.".into(),
             fraction: None,
         },
@@ -215,7 +224,9 @@ enum Message {
     RootPath(String),
     Query(String),
     BrowseCatalogue,
+    CreateCatalogue,
     CataloguePicked(Option<PathBuf>),
+    CatalogueCreatedPath(Option<PathBuf>),
     BrowseRoot,
     RootPicked(Option<PathBuf>),
     Search,
@@ -344,6 +355,41 @@ impl StudioUi {
                     Message::CataloguePicked,
                 );
             }
+            Message::CreateCatalogue => {
+                if self.job.is_some() {
+                    return Task::none();
+                }
+                if self.root_path.trim().is_empty() {
+                    self.status = "Choose the source folder before creating a catalogue.".into();
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Create a new File Studio catalogue")
+                            .add_filter("SQLite catalogue", &["sqlite"])
+                            .set_file_name("catalogue.sqlite")
+                            .save_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    Message::CatalogueCreatedPath,
+                );
+            }
+            Message::CatalogueCreatedPath(Some(path)) => {
+                if !is_sqlite_catalogue_path(&path) {
+                    self.status = "Choose a .sqlite or .sqlite3 catalogue path.".into();
+                    return Task::none();
+                }
+                let request = Request {
+                    operation: "scan".into(),
+                    input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
+                    output: path,
+                    ..Request::default()
+                };
+                return self.submit(RequestKind::CreateCatalogue, request);
+            }
+            Message::CatalogueCreatedPath(None) => {}
             Message::CataloguePicked(path) => {
                 if let Some(path) = path {
                     self.catalogue_path = path.to_string_lossy().into_owned();
@@ -631,6 +677,23 @@ impl StudioUi {
 
     fn finish_request(&mut self, kind: RequestKind, outcome: Outcome) -> Task<Message> {
         match kind {
+            RequestKind::CreateCatalogue => {
+                let Some(path) = outcome.written else {
+                    self.status = "Catalogue creation finished without an output path.".into();
+                    return Task::none();
+                };
+                self.catalogue_path = path.to_string_lossy().into_owned();
+                self.catalogue_selection = Some(path);
+                self.search_results = None;
+                self.history.clear();
+                self.history_truncated = false;
+                self.inspection_path = None;
+                self.inspection_catalogued_bytes = None;
+                self.inspection_report = None;
+                self.page_index = 0;
+                self.status = "Catalogue created. Loading the first scan snapshot…".into();
+                return self.start_history();
+            }
             RequestKind::Search => match SearchReport::parse(&outcome.preview) {
                 Ok(report) => {
                     self.page_index = 0;
@@ -816,6 +879,17 @@ impl StudioUi {
     }
 
     fn catalogue_view(&self) -> Element<'_, Message> {
+        let create_row = row![
+            text("New catalogue"),
+            text("Create a read-only scan snapshot from the selected source folder."),
+            button("Create catalogue…").on_press_maybe(
+                (self.job.is_none() && !self.root_path.trim().is_empty())
+                    .then_some(Message::CreateCatalogue)
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .wrap();
         let open_row = row![
             text("Saved catalogue"),
             text_input(
@@ -1001,6 +1075,7 @@ impl StudioUi {
                 open_row,
                 search_row,
                 refresh_row,
+                create_row,
                 result_table,
                 inspector,
                 history_table,
@@ -1081,6 +1156,7 @@ impl StudioUi {
 
 fn request_title(kind: RequestKind) -> &'static str {
     match kind {
+        RequestKind::CreateCatalogue => "Catalogue creation",
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
@@ -1161,6 +1237,11 @@ mod tests {
         let _ = ui.update(Message::InspectCatalogueFile("report.txt".into()));
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose the source folder"));
+        let _ = ui.update(Message::CreateCatalogue);
+        assert!(ui.job.is_none());
+        assert!(ui
+            .status
+            .contains("Choose the source folder before creating"));
     }
 
     #[cfg(unix)]
@@ -1219,8 +1300,20 @@ mod tests {
         assert!(scanning.label.contains("indeterminate"));
         assert_eq!(scanning.fraction, None);
 
+        let creating = progress_presentation(RequestKind::CreateCatalogue, None);
+        assert_eq!(creating.label, scanning.label);
+        assert_eq!(creating.fraction, None);
+
         let indexing = progress_presentation(RequestKind::Refresh, Some(0.4));
         assert!(indexing.label.contains("40%"));
         assert_eq!(indexing.fraction, Some(0.4));
+    }
+
+    #[test]
+    fn catalogue_creation_accepts_only_sqlite_outputs() {
+        assert!(is_sqlite_catalogue_path(Path::new("/tmp/index.sqlite")));
+        assert!(is_sqlite_catalogue_path(Path::new("/tmp/index.SQLITE3")));
+        assert!(!is_sqlite_catalogue_path(Path::new("/tmp/index.csv")));
+        assert!(!is_sqlite_catalogue_path(Path::new("/tmp/index")));
     }
 }

@@ -104,7 +104,7 @@
       "description": "Signature subset, SHA-256/SHA-512/BLAKE3; JSON",
       "status": "implemented-unverified",
       "targets": [],
-      "fixture_status": "not run"
+      "fixture_status": "Existing scan JSON/CSV/SQLite fixtures; dedicated native Catalogue-page creation flow added with background scan, cancellation and no-clobber output; hosted verification pending"
     },
     {
       "operation": "verify",
