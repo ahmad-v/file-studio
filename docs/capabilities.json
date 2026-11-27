@@ -6,7 +6,7 @@
   "development_routes": [
     {
       "operation": "catalog-compare",
-      "description": "Compare paths and sizes in saved inventories",
+      "description": "Compare paths and sizes in JSON inventory or versioned SQLite catalogue snapshots",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"
@@ -117,7 +117,7 @@
     },
     {
       "operation": "catalog-search",
-      "description": "Search a saved version 1 inventory by path text",
+      "description": "Search a saved JSON inventory or disconnected versioned SQLite snapshot by path text",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"
@@ -125,8 +125,26 @@
       "fixture_status": "Linux CLI searched a saved inventory after its source directory moved"
     },
     {
+      "operation": "catalog-refresh",
+      "description": "Append immutable scans, migrate schema v1, and report deltas for matching Unix filesystem/root identity; Windows safely uses full-rescan fallback",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Existing transactional append fixture; Unix identity, Windows/unknown fallback, and schema-v1 migration tests added but not yet executed"
+    },
+    {
+      "operation": "catalog-history",
+      "description": "Read recent scan timestamps, root labels, size/file totals, and safe refresh delta classifications from a SQLite catalogue",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux integration fixture verified two retained scan records without source access"
+    },
+    {
       "operation": "scan",
-      "description": "Bounded directory inventory; JSON/CSV",
+      "description": "Bounded directory inventory; JSON, CSV or versioned SQLite snapshot",
       "status": "implemented-unverified",
       "targets": [],
       "fixture_status": "not run"

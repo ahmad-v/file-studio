@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 mod catalog;
+pub mod catalogue_workspace;
 mod encryption;
 mod png_metadata;
 use localwright_core::*;
@@ -9,13 +10,13 @@ use sha2::{Digest, Sha256, Sha512};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "inspect",
         label: "Inspect",
-        hint: "Read a regular file and compute SHA-256, SHA-512 and BLAKE3. Optional new JSON output.",
+        hint: "Inspect signature, timestamps, hashes, a bounded hexadecimal sample, and supported format properties. Optional new JSON output.",
     },
     Operation {
         id: "png-metadata",
@@ -77,7 +78,7 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "catalog-compare",
         label: "Compare saved inventories",
-        hint: "Input the earlier scan JSON and enter the newer scan path. Optional new JSON report.",
+        hint: "Input the earlier JSON inventory or SQLite catalogue and enter the later inventory path. Optional new JSON report.",
     },
     Operation {
         id: "file-times",
@@ -87,12 +88,14 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         id: "catalog-search",
         label: "Search a saved file inventory",
-        hint: "Input a scan JSON and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
+        hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
+    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Unix filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
+    Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation {
         id: "scan",
         label: "Scan",
-        hint: "Read-only recursive directory inventory. Output new JSON or CSV; symbolic links are skipped.",
+        hint: "Read-only recursive directory inventory. Output new JSON, CSV or .sqlite catalogue; symbolic links are skipped.",
     },
 ];
 fn identify(b: &[u8]) -> &'static str {
@@ -186,6 +189,80 @@ fn inspect(p: &Path, j: &Job, expected_size: Option<u64>) -> Result<Value> {
     Ok(
         json!({"schema_version":1,"bytes":total,"signature":kind,"sha256":format!("{:x}",sha.finalize()),"sha512":format!("{:x}",sha512.finalize()),"blake3":b3.finalize().to_hex().to_string()}),
     )
+}
+
+/// Build the user-facing inspector report. The expensive hash pass remains a
+/// separate primitive because catalogue and archive workflows reuse it.
+fn inspect_report(path: &Path, job: &Job) -> Result<Value> {
+    let mut report = inspect(path, job, None)?;
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || before.file_type().is_symlink() {
+        return Err(Error::input("Expected regular non-symlink file"));
+    }
+
+    let mut file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != report["bytes"].as_u64().unwrap_or(u64::MAX) {
+        return Err(Error::input("File changed during inspection"));
+    }
+    let sample_len = usize::try_from(opened.len().min(64)).unwrap_or(64);
+    let mut sample = vec![0; sample_len];
+    file.read_exact(&mut sample)?;
+    job.check()?;
+    let after = file.metadata()?;
+    let path_after = fs::symlink_metadata(path)?;
+    if after.len() != opened.len()
+        || after.modified()? != opened.modified()?
+        || path_after.len() != opened.len()
+        || path_after.modified()? != opened.modified()?
+    {
+        return Err(Error::input("File changed during inspection"));
+    }
+
+    let hex = sample
+        .chunks(16)
+        .map(|row| {
+            row.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    let ascii = sample
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    let times = file_times(path)?;
+    report["timestamps"] = times;
+    report["hex_sample"] = json!({
+        "offset": 0,
+        "bytes_displayed": sample.len(),
+        "hex_rows": hex,
+        "ascii": ascii,
+    });
+
+    if report["signature"] == "image/png" {
+        let metadata = if opened.len() <= 32 * 1024 * 1024 {
+            png_metadata::process(path, None, job)
+        } else {
+            Err(Error::input(
+                "PNG exceeds the 32 MiB metadata-inspection limit",
+            ))
+        };
+        report["format_properties"] = match metadata {
+            Ok(properties) => properties,
+            Err(error) => json!({"inspection_error": error.message}),
+        };
+    } else {
+        report["format_properties"] = Value::Null;
+    }
+    Ok(report)
 }
 fn hex_preview(path: &Path, parameter: &str, job: &Job) -> Result<Value> {
     let (offset, length) = if parameter.trim().is_empty() {
@@ -729,6 +806,9 @@ fn list_zip(p: &Path, job: &Job) -> Result<Value> {
 }
 
 fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
+    // The number of files is unknown until traversal completes, so expose this phase
+    // as indeterminate rather than treating the safety limit as a completion estimate.
+    j.progress(0, 0);
     let m = fs::symlink_metadata(root)?;
     if !m.is_dir() || m.file_type().is_symlink() {
         return Err(Error::input("Choose a non-symlink directory"));
@@ -1016,7 +1096,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         });
     }
     let value = match r.operation.as_str() {
-        "inspect" => inspect(&r.input, &j, None)?,
+        "inspect" => inspect_report(&r.input, &j)?,
         "png-metadata" => png_metadata::process(&r.input, None, &j)?,
         "png-strip-metadata" => {
             let report = png_metadata::process(&r.input, Some(&r.output), &j)?;
@@ -1117,11 +1197,16 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "file-times" => file_times(&r.input)?,
         "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
         "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
+        "catalog-history" => catalog::history(&r.input, &j)?,
+        "catalog-refresh" => {
+            let files = scan(&r.input, &j)?;
+            catalog::refresh(Path::new(&r.parameter), &r.input, &files, &j)?
+        }
         "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
         _ => return Err(Error::input("Unknown operation")),
     };
     let mut written = None;
-    let encoded = serde_json::to_string_pretty(&value)?;
+    let mut encoded = serde_json::to_string_pretty(&value)?;
     if !r.output.as_os_str().is_empty() {
         j.check()?;
         match r.output.extension().and_then(|s| s.to_str()) {
@@ -1141,7 +1226,20 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 w.flush()?;
                 Ok(())
             })?,
-            _ if r.operation == "scan" => return Err(Error::input("Choose .json or .csv")),
+            Some(extension)
+                if r.operation == "scan"
+                    && (extension.eq_ignore_ascii_case("sqlite")
+                        || extension.eq_ignore_ascii_case("sqlite3")) =>
+            {
+                let files = value["files"]
+                    .as_array()
+                    .ok_or_else(|| Error::input("Scan report has no file list"))?;
+                let report = catalog::create(&r.input, files, &r.output, &j)?;
+                encoded = serde_json::to_string_pretty(&report)?;
+            }
+            _ if r.operation == "scan" => {
+                return Err(Error::input("Choose .json, .csv or .sqlite output"))
+            }
             _ => return Err(Error::input("Choose .json output")),
         };
         written = Some(r.output);
@@ -1159,6 +1257,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         written,
         warnings: vec![if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
+        } else if r.operation == "inspect" {
+            "The hexadecimal sample contains original file bytes and may be sensitive. Signature identification is limited; PNG chunk inspection does not decode metadata values.".into()
         } else if r.operation == "duplicates" {
             "Candidates share a size and BLAKE3 checksum. Review files before making any changes."
                 .into()
@@ -1171,6 +1271,10 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             "Timestamps are milliseconds since the Unix epoch. Unavailable timestamps appear as null.".into()
         } else if r.operation == "catalog-search" {
             "Results describe the saved scan. Files may have moved or changed. The source drive is not accessed.".into()
+        } else if r.operation == "catalog-refresh" {
+            "A new scan snapshot was appended in one SQLite transaction. Older history remains available; the source scan is read-only.".into()
+        } else if r.operation == "catalog-history" {
+            "History comes from the local catalogue only. Original volumes and listed paths are not opened.".into()
         } else if r.operation == "png-metadata" {
             "Reports PNG chunk types and counts without decoding image pixels or metadata values."
                 .into()
@@ -1185,6 +1289,82 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }],
         ..Outcome::default()
     })
+}
+
+/// Handle File Studio routes that require a native path value outside the text-only
+/// operation contract. The catalogue UI keeps selected paths intact and resolves
+/// saved relative paths beneath the user-selected source folder before inspection.
+pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
+    if r.operation == "workspace-catalog-inspect" {
+        let path = resolve_catalogue_selection(&r.input, &r.parameter)?;
+        let report = inspect_report(&path, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            warnings: vec![
+                "Read-only inspection. The bounded hexadecimal sample contains original file bytes and may be sensitive.".into(),
+            ],
+            ..Outcome::default()
+        });
+    }
+    if r.operation != "workspace-catalog-refresh" {
+        return handle(r, j);
+    }
+    if r.output.as_os_str().is_empty() {
+        return Err(Error::input("Choose an existing SQLite catalogue"));
+    }
+    let files = scan(&r.input, &j)?;
+    let report = catalog::refresh(&r.output, &r.input, &files, &j)?;
+    Ok(Outcome {
+        preview: serde_json::to_string_pretty(&report)?,
+        written: Some(r.output),
+        warnings: vec![
+            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts are inferred only when the stable source identity matches; otherwise no cross-source comparison is claimed.".into(),
+        ],
+        ..Outcome::default()
+    })
+}
+
+fn resolve_catalogue_selection(root: &Path, relative: &str) -> Result<PathBuf> {
+    if relative.is_empty() || relative.len() > 64 * 1024 {
+        return Err(Error::input("Choose a valid catalogue file path"));
+    }
+    let root_metadata = fs::symlink_metadata(root)?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(Error::input("Choose a non-symlink source folder"));
+    }
+    let root = fs::canonicalize(root)?;
+    let relative = Path::new(relative);
+    if relative.is_absolute() {
+        return Err(Error::input("Catalogue paths must be relative"));
+    }
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::input("Catalogue path contains an unsafe component"));
+    }
+
+    let mut candidate = root.clone();
+    for (index, component) in components.iter().enumerate() {
+        candidate.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&candidate)?;
+        if metadata.file_type().is_symlink()
+            || (index + 1 < components.len() && !metadata.is_dir())
+            || (index + 1 == components.len() && !metadata.is_file())
+        {
+            return Err(Error::input(
+                "Catalogue selection must contain only directories and a regular file",
+            ));
+        }
+    }
+
+    let canonical = fs::canonicalize(&candidate)?;
+    if !canonical.starts_with(&root) || !fs::metadata(&canonical)?.is_file() {
+        return Err(Error::input("Selected file escaped the source folder"));
+    }
+    Ok(canonical)
 }
 #[cfg(test)]
 mod tests {
@@ -1223,6 +1403,53 @@ mod tests {
         )
         .unwrap();
         assert!(fs::read_to_string(output).unwrap().contains("é.txt,3"));
+    }
+
+    #[test]
+    fn integrated_inspection_combines_integrity_timestamps_hex_and_png_properties() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.png");
+        let output = directory.path().join("inspection.json");
+        let fixture = include_bytes!("../tests/fixtures/png-metadata.png");
+        fs::write(&path, fixture).unwrap();
+
+        let outcome = handle(
+            Request {
+                operation: "inspect".into(),
+                input: path.clone(),
+                output: output.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(outcome.written, Some(output.clone()));
+        let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+        assert_eq!(report["signature"], "image/png");
+        assert_eq!(report["bytes"], fixture.len());
+        assert!(report["timestamps"]["modified_unix_ms"].is_number());
+        assert_eq!(report["hex_sample"]["offset"], 0);
+        assert_eq!(report["hex_sample"]["bytes_displayed"], 64);
+        assert_eq!(
+            report["hex_sample"]["hex_rows"][0],
+            "89 50 4e 47 0d 0a 1a 0a 00 00 00 0d 49 48 44 52"
+        );
+        assert_eq!(report["format_properties"]["removable"], 4);
+        assert_eq!(fs::read(path).unwrap(), fixture);
+    }
+
+    #[test]
+    fn integrated_inspection_handles_short_binary_files_without_expansion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.bin");
+        fs::write(&path, [0, b'A', 0x80]).unwrap();
+
+        let report = inspect_report(&path, &Job::new()).unwrap();
+        assert_eq!(report["signature"], "unknown");
+        assert_eq!(report["hex_sample"]["hex_rows"][0], "00 41 80");
+        assert_eq!(report["hex_sample"]["ascii"], ".A.");
+        assert!(report["timestamps"].is_object());
+        assert!(report["format_properties"].is_null());
     }
     #[test]
     fn lists_zip_entries_without_extracting_files() {
@@ -1332,6 +1559,264 @@ mod tests {
         assert_eq!(
             report["files"][0],
             json!({"path":"Café Notes.txt","bytes":3})
+        );
+    }
+
+    #[test]
+    fn sqlite_catalog_searches_offline_and_retains_append_only_scan_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("removable-volume");
+        let database = directory.path().join("volume.sqlite");
+        let earlier = directory.path().join("earlier.json");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("report.txt"), b"first").unwrap();
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert!(handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .is_err());
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: earlier.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        fs::write(root.join("report.txt"), b"changed-size").unwrap();
+        fs::write(root.join("notes.txt"), b"new").unwrap();
+        let refreshed = handle(
+            Request {
+                operation: "catalog-refresh".into(),
+                input: root.clone(),
+                parameter: database.to_string_lossy().into_owned(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let refresh_report: Value = serde_json::from_str(&refreshed.preview).unwrap();
+        assert_eq!(refresh_report["history"], true);
+        if catalog::stable_source_identity(&root).is_some() {
+            assert_eq!(refresh_report["comparison_mode"], "same-source");
+            assert_eq!(refresh_report["added"], 1);
+            assert_eq!(refresh_report["changed"], 1);
+            assert_eq!(refresh_report["removed"], 0);
+        } else {
+            assert_eq!(refresh_report["comparison_mode"], "full-rescan");
+        }
+        let compared = handle(
+            Request {
+                operation: "catalog-compare".into(),
+                input: earlier.clone(),
+                parameter: database.to_string_lossy().into_owned(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let comparison: Value = serde_json::from_str(&compared.preview).unwrap();
+        assert_eq!(comparison["added"][0]["path"], "notes.txt");
+        assert_eq!(comparison["size_changed"][0]["path"], "report.txt");
+
+        fs::remove_file(root.join("report.txt")).unwrap();
+        fs::remove_file(root.join("notes.txt")).unwrap();
+        fs::remove_dir(root).unwrap();
+        let searched = handle(
+            Request {
+                operation: "catalog-search".into(),
+                input: database.clone(),
+                parameter: "NOTES".into(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let results: Value = serde_json::from_str(&searched.preview).unwrap();
+        assert_eq!(results["catalogued_files"], 2);
+        assert_eq!(results["matched_files"], 1);
+        assert_eq!(results["files"][0]["path"], "notes.txt");
+
+        let history = handle(
+            Request {
+                operation: "catalog-history".into(),
+                input: database,
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let scans: Value = serde_json::from_str(&history.preview).unwrap();
+        assert_eq!(scans["scans"].as_array().unwrap().len(), 2);
+        assert_eq!(scans["scans"][0]["files"], 2);
+    }
+
+    #[test]
+    fn selected_catalogue_file_inspection_is_read_only_and_rejects_escape_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let outside = directory.path().join("outside.txt");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/report.txt"), b"inspect this file").unwrap();
+        fs::write(&outside, b"outside the source").unwrap();
+
+        let rows = scan(&root, &Job::new()).unwrap();
+        let saved_relative_path = rows[0]["path"].as_str().unwrap().to_owned();
+        let inspected = handle_workspace(
+            Request {
+                operation: "workspace-catalog-inspect".into(),
+                input: root.clone(),
+                parameter: saved_relative_path.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&inspected.preview).unwrap();
+        assert_eq!(report["bytes"], b"inspect this file".len() as u64);
+        assert!(report["sha256"].as_str().is_some());
+        assert!(inspected.written.is_none());
+        assert_eq!(
+            fs::read(root.join(saved_relative_path)).unwrap(),
+            b"inspect this file"
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"outside the source");
+
+        for unsafe_path in ["../outside.txt", "nested/../nested/report.txt", ""] {
+            assert!(handle_workspace(
+                Request {
+                    operation: "workspace-catalog-inspect".into(),
+                    input: root.clone(),
+                    parameter: unsafe_path.into(),
+                    ..Request::default()
+                },
+                Job::new(),
+            )
+            .is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_catalogue_file_inspection_rejects_symlink_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let outside = directory.path().join("outside.txt");
+        fs::create_dir(&root).unwrap();
+        fs::write(&outside, b"private outside content").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked.txt")).unwrap();
+
+        let result = handle_workspace(
+            Request {
+                operation: "workspace-catalog-inspect".into(),
+                input: root,
+                parameter: "linked.txt".into(),
+                ..Request::default()
+            },
+            Job::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sqlite_catalog_rejects_wrong_schema_and_catalogue_inside_scanned_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let wrong_schema = directory.path().join("wrong.sqlite");
+        let wrong_page_size = directory.path().join("large-pages.sqlite");
+        fs::create_dir(&root).unwrap();
+        let db = rusqlite::Connection::open(&wrong_schema).unwrap();
+        db.execute_batch("PRAGMA application_id=123; PRAGMA user_version=1;")
+            .unwrap();
+        drop(db);
+        assert!(catalog::history(&wrong_schema, &Job::new()).is_err());
+        let db = rusqlite::Connection::open(&wrong_page_size).unwrap();
+        db.execute_batch(
+            "PRAGMA page_size=8192; PRAGMA application_id=1280791107; PRAGMA user_version=1;",
+        )
+        .unwrap();
+        drop(db);
+        assert!(catalog::history(&wrong_page_size, &Job::new()).is_err());
+        let inside = root.join("catalog.sqlite");
+        let rows = scan(&root, &Job::new()).unwrap();
+        assert!(catalog::create(&root, &rows, &inside, &Job::new()).is_err());
+        assert!(!inside.exists());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn native_catalogue_refresh_keeps_non_unicode_selected_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory
+            .path()
+            .join(std::ffi::OsString::from_vec(b"source-\xff".to_vec()));
+        let database = directory.path().join(std::ffi::OsString::from_vec(
+            b"catalogue-\xff.sqlite".to_vec(),
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), b"original").unwrap();
+
+        handle(
+            Request {
+                operation: "scan".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let refreshed = handle_workspace(
+            Request {
+                operation: "workspace-catalog-refresh".into(),
+                input: root,
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&refreshed.preview).unwrap()["scan_id"],
+            2
+        );
+        let history = handle(
+            Request {
+                operation: "catalog-history".into(),
+                input: database,
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&history.preview).unwrap()["scans"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
     }
 
