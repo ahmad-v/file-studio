@@ -355,10 +355,11 @@ pub fn refresh(path: &Path, root: &Path, files: &[Value], job: &Job) -> Result<V
         .query_row(
             "SELECT source_id FROM scans ORDER BY id DESC LIMIT 1",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()
-        .map_err(sqlite_error)?;
+        .map_err(sqlite_error)?
+        .flatten();
     let previous = latest_scan(&db, job)?.1;
     let source_id = stable_source_identity(&root);
     let current = files
