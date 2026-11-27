@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 mod catalog;
+mod encryption;
 mod png_metadata;
 use localwright_core::*;
 use serde::Deserialize;
@@ -36,6 +37,9 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Verify checksum",
         hint: "Enter sha256=HEX or blake3=HEX (64 digits), or sha512=HEX (128 digits). Optional new JSON output on match.",
     },
+    Operation { id: "age-keygen", label: "Create age identity", hint: "Create a new X25519 identity file. Keep it private and backed up; only the public recipient key is shown." },
+    Operation { id: "age-encrypt", label: "Encrypt with age", hint: "Enter an age X25519 recipient key and choose a new .age output. Streaming input limit: 4 GiB." },
+    Operation { id: "age-decrypt", label: "Decrypt age file", hint: "Enter the path to a private age identity file and choose a new output. Authentication is checked before output is published." },
     Operation { id: "manifest-create", label: "Create checksum manifest", hint: "Create a versioned SHA-256 manifest for regular files below a directory. Choose a new .json output." },
     Operation { id: "manifest-verify", label: "Verify checksum manifest", hint: "Input a manifest JSON and enter its directory root as the parameter. Reports missing, changed and matching files without writing to them." },
     Operation {
@@ -979,6 +983,38 @@ fn safe_cell(s: &str) -> String {
 }
 pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     j.check()?;
+    if r.operation == "age-keygen" {
+        let report = encryption::generate_key(&r.output)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["The saved identity file contains a private key. Restrict access to it and keep a secure backup. The recipient key is public. No passphrase is applied to the identity file.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "age-encrypt" {
+        let report = encryption::encrypt(&r.input, &r.output, &r.parameter, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["Encryption uses the age X25519 format and authenticates ciphertext integrity. It does not identify the sender; share the recipient key through a trusted channel.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "age-decrypt" {
+        if r.parameter.trim().is_empty() {
+            return Err(Error::input(
+                "Enter the private identity file path as the parameter",
+            ));
+        }
+        let report = encryption::decrypt(&r.input, &r.output, Path::new(r.parameter.trim()), &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["Authenticated age plaintext was written to a new file. The identity file remains unchanged.".into()],
+            ..Outcome::default()
+        });
+    }
     let value = match r.operation.as_str() {
         "inspect" => inspect(&r.input, &j, None)?,
         "png-metadata" => png_metadata::process(&r.input, None, &j)?,
