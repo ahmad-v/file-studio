@@ -6,6 +6,8 @@ Development source only. Launch the GUI after compiling. Choose an operation, en
 - `directory-usage`: Reports logical file sizes by top-level directory. Symlinks are skipped and hard links are counted by name.
 - `inspect`: Signature subset, SHA-256/SHA-512/BLAKE3; JSON.
 - `verify` checks the input against a SHA-256, SHA-512, or BLAKE3 checksum. Enter `sha256=HEX` or `blake3=HEX` in the operation parameter, using 64 hexadecimal digits, or `sha512=HEX` using 128 digits. Obtain the checksum from a trusted source. Leave the output blank for a preview or give it a new `.json` path for a report. A mismatch reports an error and creates no output.
+- `age-keygen` creates a new age X25519 identity file at the chosen output path and displays its public recipient key. The saved file is private key material and has no passphrase protection. On Unix it is written with owner-only permissions. On Windows, identity files must be saved under your user profile and inherit that directory's access controls. Keep a secure backup and do not share the identity file.
+- `age-encrypt` encrypts a regular file to the age X25519 public recipient key in Parameter and writes a new `.age` file. `age-decrypt` reads a regular age file and writes decrypted bytes to a new output path; enter the identity file path in Parameter. Both routes stream up to 4 GiB. On Windows, decrypted output must be saved under your user profile. Decryption publishes output only after the age stream authenticates successfully. Wrong keys, tampering, and collisions create no output.
 - `zip-list`: List ZIP entries and declared sizes. Optional new JSON output. Member data is never expanded.
 - `scan`: Bounded directory inventory; JSON/CSV.
 
@@ -15,7 +17,7 @@ To verify the bundled sample from the command line:
 cargo run --locked --no-default-features -- --cli verify tests/fixtures/abc.txt "" sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
-Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. Scanning aborts on unreadable entries; no persistent volume catalogue, broad metadata sanitation, authenticated signatures, encryption or backup. Archive creation omits empty directories and filesystem metadata. A locally stored checksum manifest can be edited by anyone who can modify it.
+Limitations: Signature identification is a limited prefix test, not exhaustive or format validation. Age encryption does not prove who sent a file, and the generated identity is not passphrase-protected. The app does not yet create or verify digital signatures. Scanning aborts on unreadable entries; no persistent volume catalogue, broad metadata sanitation or backup. Archive creation omits empty directories and filesystem metadata. A locally stored checksum manifest can be edited by anyone who can modify it.
 
 No output overwrite is allowed. No accounts, ads, telemetry or runtime downloads are intended. Do not use this unverified snapshot with valuable or hostile input. Citation and donations are voluntary.
 
