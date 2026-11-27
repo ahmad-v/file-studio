@@ -633,7 +633,7 @@ impl StudioUi {
         };
         let mut status = self.status.clone();
         if let Some(error) = &self.preferences_error {
-            status.push_str("\n");
+            status.push('\n');
             status.push_str(error);
         }
         container(
