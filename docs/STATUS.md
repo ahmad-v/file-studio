@@ -28,7 +28,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 
 ## Native catalogue workspace
 
-The GUI starts on a Catalogue page with native file/folder pickers, read-only path-fragment search over a saved SQLite snapshot, a paginated result table (100 rows per page), recent scan-history rows, and a refresh action that appends a new complete scan through the existing `catalog-refresh` route. The Operations page retains all registered File Studio operations. Unit tests were added for bounded result/history parsing, pagination behavior, input validation, settings compatibility and native non-Unicode paths. The initial UI/view-model implementation was type-checked, but tests were not executed because `cargo test --locked` stopped on workspace disk exhaustion (ENOSPC); the final path-preservation adapter edits received formatting checks only. Native visual/usability, screen-reader and accessibility review remain pending.
+The GUI starts on a Catalogue page with native file/folder pickers, read-only path-fragment search over a saved SQLite snapshot, a paginated result table (100 rows per page), recent scan-history rows, and a refresh action that appends a new complete scan through the existing `catalog-refresh` route. Refresh progress is indeterminate during directory traversal and determinate while SQLite rows are added; polling runs only while a job is active, and cancellation remains available. The Operations page retains all registered File Studio operations. Unit tests cover bounded result/history parsing, pagination behavior, input validation, settings compatibility, native non-Unicode paths and the progress display model. Native visual/usability, screen-reader and accessibility review remain pending.
 
 ## Known gaps
 

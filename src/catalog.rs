@@ -125,7 +125,9 @@ fn insert_scan(db: &mut Connection, label: &str, files: &[Value], job: &Job) -> 
         let mut insert = transaction
             .prepare("INSERT INTO files(scan_id, path, bytes) VALUES(?1, ?2, ?3)")
             .map_err(sqlite_error)?;
-        for file in files {
+        let total = u64::try_from(files.len())
+            .map_err(|_| Error::input("Catalogue row count is out of range"))?;
+        for (index, file) in files.iter().enumerate() {
             job.check()?;
             let relative = file["path"]
                 .as_str()
@@ -136,6 +138,9 @@ fn insert_scan(db: &mut Connection, label: &str, files: &[Value], job: &Job) -> 
             insert
                 .execute((scan_id, relative, bytes.to_string()))
                 .map_err(sqlite_error)?;
+            let completed = u64::try_from(index + 1)
+                .map_err(|_| Error::input("Catalogue progress is out of range"))?;
+            job.progress(completed, total);
             total_bytes += u128::from(bytes);
         }
     }
@@ -146,6 +151,9 @@ fn insert_scan(db: &mut Connection, label: &str, files: &[Value], job: &Job) -> 
         )
         .map_err(sqlite_error)?;
     transaction.commit().map_err(sqlite_error)?;
+    if files.is_empty() {
+        job.progress(1, 1);
+    }
     Ok(scan_id)
 }
 

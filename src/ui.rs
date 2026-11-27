@@ -5,8 +5,10 @@ use futures::channel::oneshot;
 use iced::{
     keyboard::{key::Named, Key, Modifiers},
     theme::Palette,
-    widget::{button, column, container, pick_list, row, scrollable, text, text_input},
-    Color, Element, Length, Task, Theme,
+    widget::{
+        button, column, container, pick_list, progress_bar, row, scrollable, text, text_input,
+    },
+    Color, Element, Length, Subscription, Task, Theme,
 };
 use localwright_core::{Error, ErrorKind, Handler, Job, Operation, Outcome, Request};
 use localwright_ui::THEMES;
@@ -15,6 +17,7 @@ use std::{
     env, fmt, fs,
     io::Write,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 const SCALES: [u16; 7] = [80, 100, 125, 150, 200, 250, 300];
@@ -36,6 +39,43 @@ enum RequestKind {
     History,
     Refresh,
     Operation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ProgressPresentation {
+    label: String,
+    fraction: Option<f32>,
+}
+
+fn progress_presentation(kind: RequestKind, fraction: Option<f32>) -> ProgressPresentation {
+    match (kind, fraction) {
+        (RequestKind::Refresh, None) => ProgressPresentation {
+            label: "Scanning folder; progress is indeterminate.".into(),
+            fraction: None,
+        },
+        (RequestKind::Refresh, Some(fraction)) => ProgressPresentation {
+            label: format!(
+                "Saving catalogue snapshot: {:.0}% complete",
+                fraction * 100.0
+            ),
+            fraction: Some(fraction.clamp(0.0, 1.0)),
+        },
+        (_, None) => ProgressPresentation {
+            label: format!(
+                "{} is running; progress is indeterminate.",
+                request_title(kind)
+            ),
+            fraction: None,
+        },
+        (_, Some(fraction)) => ProgressPresentation {
+            label: format!(
+                "{} progress: {:.0}% complete",
+                request_title(kind),
+                fraction * 100.0
+            ),
+            fraction: Some(fraction.clamp(0.0, 1.0)),
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +199,7 @@ struct StudioUi {
     operation_preview: String,
     status: String,
     job: Option<Job>,
+    job_kind: Option<RequestKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +232,7 @@ enum Message {
     Cancel,
     KeyPressed(Key, Modifiers),
     RequestFinished(RequestKind, localwright_core::Result<Outcome>),
+    ProgressTick,
 }
 
 impl StudioUi {
@@ -239,6 +281,7 @@ impl StudioUi {
             operation_preview: String::new(),
             status: "Open a saved catalogue or create one from the Operations page.".into(),
             job: None,
+            job_kind: None,
         }
     }
 
@@ -386,6 +429,7 @@ impl StudioUi {
                         "Cancellation requested; waiting for the operation to stop.".into();
                 }
             }
+            Message::ProgressTick => {}
             Message::KeyPressed(Key::Named(Named::Escape), _) => {
                 return self.update(Message::Cancel);
             }
@@ -397,6 +441,7 @@ impl StudioUi {
             Message::KeyPressed(_, _) => {}
             Message::RequestFinished(kind, result) => {
                 self.job = None;
+                self.job_kind = None;
                 match result {
                     Ok(outcome) => return self.finish_request(kind, outcome),
                     Err(error) => {
@@ -484,6 +529,7 @@ impl StudioUi {
     fn submit(&mut self, kind: RequestKind, request: Request) -> Task<Message> {
         let job = Job::new();
         self.job = Some(job.clone());
+        self.job_kind = Some(kind);
         self.status = format!("{} running…", request_title(kind));
         let handler = self.handler;
         let (sender, receiver) = oneshot::channel();
@@ -494,6 +540,7 @@ impl StudioUi {
             })
         {
             self.job = None;
+            self.job_kind = None;
             self.status = format!("Could not start operation: {error}");
             return Task::none();
         }
@@ -636,10 +683,26 @@ impl StudioUi {
             status.push('\n');
             status.push_str(error);
         }
+        let progress: Element<'_, Message> = match (self.job.as_ref(), self.job_kind) {
+            (Some(job), Some(kind)) => {
+                let presentation = progress_presentation(kind, job.fraction());
+                match presentation.fraction {
+                    Some(fraction) => column![
+                        text(presentation.label),
+                        progress_bar(0.0..=1.0, fraction).width(Length::Fill),
+                    ]
+                    .spacing(4)
+                    .into(),
+                    None => text(presentation.label).into(),
+                }
+            }
+            _ => text("").into(),
+        };
         container(
             column![
                 title,
                 text(status).wrapping(text::Wrapping::WordOrGlyph),
+                progress,
                 body
             ]
             .spacing(12)
@@ -885,10 +948,24 @@ fn run(operations: &'static [Operation], handler: Handler) -> iced::Result {
     iced::application("File Studio", StudioUi::update, StudioUi::view)
         .theme(StudioUi::theme)
         .scale_factor(|state: &StudioUi| f64::from(state.preferences.scale) / 100.0)
-        .subscription(|_state: &StudioUi| {
-            iced::keyboard::on_key_press(|key, modifiers| Some(Message::KeyPressed(key, modifiers)))
-        })
+        .subscription(StudioUi::subscription)
         .run_with(move || (StudioUi::new(operations, handler), Task::none()))
+}
+
+impl StudioUi {
+    fn subscription(&self) -> Subscription<Message> {
+        let keyboard = iced::keyboard::on_key_press(|key, modifiers| {
+            Some(Message::KeyPressed(key, modifiers))
+        });
+        if self.job.is_some() {
+            Subscription::batch([
+                keyboard,
+                iced::time::every(Duration::from_millis(100)).map(|_| Message::ProgressTick),
+            ])
+        } else {
+            keyboard
+        }
+    }
 }
 
 pub fn run_app(operations: &'static [Operation], handler: Handler) -> iced::Result {
@@ -986,5 +1063,16 @@ mod tests {
         let _ = ui.update(Message::Search);
         assert!(ui.job.is_none());
         assert!(ui.status.contains("at most 4 KiB"));
+    }
+
+    #[test]
+    fn progress_model_distinguishes_unknown_scan_from_snapshot_indexing() {
+        let scanning = progress_presentation(RequestKind::Refresh, None);
+        assert!(scanning.label.contains("indeterminate"));
+        assert_eq!(scanning.fraction, None);
+
+        let indexing = progress_presentation(RequestKind::Refresh, Some(0.4));
+        assert!(indexing.label.contains("40%"));
+        assert_eq!(indexing.fraction, Some(0.4));
     }
 }

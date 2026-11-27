@@ -806,6 +806,9 @@ fn list_zip(p: &Path, job: &Job) -> Result<Value> {
 }
 
 fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
+    // The number of files is unknown until traversal completes, so expose this phase
+    // as indeterminate rather than treating the safety limit as a completion estimate.
+    j.progress(0, 0);
     let m = fs::symlink_metadata(root)?;
     if !m.is_dir() || m.file_type().is_symlink() {
         return Err(Error::input("Choose a non-symlink directory"));
