@@ -1239,7 +1239,9 @@ mod tests {
         assert!(ui.status.contains("Choose the source folder"));
         let _ = ui.update(Message::CreateCatalogue);
         assert!(ui.job.is_none());
-        assert!(ui.status.contains("Choose the source folder before creating"));
+        assert!(ui
+            .status
+            .contains("Choose the source folder before creating"));
     }
 
     #[cfg(unix)]
