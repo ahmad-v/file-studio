@@ -203,7 +203,7 @@
       "targets": [
         "x86_64-unknown-linux-gnu"
       ],
-      "fixture_status": "Round-trip, cancellation, collision and extension tests added; hosted verification pending"
+      "fixture_status": "Hosted Check, Integration, five-target Native, Distribution preview and dependency review passed at 93ddde8."
     },
     {
       "operation": "gzip-extract",
@@ -212,7 +212,7 @@
       "targets": [
         "x86_64-unknown-linux-gnu"
       ],
-      "fixture_status": "Round-trip, concatenated-member, corrupt-CRC and truncated-stream tests added; hosted verification pending"
+      "fixture_status": "Hosted Check, Integration, five-target Native, Distribution preview and dependency review passed at 93ddde8."
     },
     {
       "operation": "gzip-test",
@@ -221,7 +221,42 @@
       "targets": [
         "x86_64-unknown-linux-gnu"
       ],
-      "fixture_status": "Round-trip, corrupt-CRC, truncated-stream and expansion-limit tests added; hosted verification pending"
+      "fixture_status": "Hosted Check, Integration, five-target Native, Distribution preview and dependency review passed at 93ddde8."
+    },
+    {
+      "operation": "tar-list",
+      "description": "List bounded TAR paths and declared member sizes without reading payloads",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Path validation, link rejection and normal listings are covered by Rust unit tests; hosted verification pending."
+    },
+    {
+      "operation": "tar-test",
+      "description": "Validate TAR headers and fully read regular members to detect truncation; TAR provides no payload checksum",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Round-trip and malformed/truncated input tests added; hosted verification pending."
+    },
+    {
+      "operation": "tar-create-directory",
+      "description": "Create an uncompressed TAR from bounded regular files beneath a selected directory",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Source preservation, round-trip and no-overwrite tests added; hosted verification pending."
+    },
+    {
+      "operation": "tar-extract-entry",
+      "description": "Extract one numbered regular TAR member to a new output path",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Round-trip and no-overwrite tests added; hosted verification pending."
+    },
+    {
+      "operation": "tar-extract-all",
+      "description": "Extract bounded regular files/directories to a new folder; reject traversal, links and special files",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Round-trip, traversal rejection, link rejection and malformed input tests added; hosted verification pending."
     },
     {
       "operation": "age-keygen",

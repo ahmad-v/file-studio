@@ -17,9 +17,13 @@ No capability is marked device-verified or released. Previous hosted jobs passed
 | zip-create | One regular file as a Deflate ZIP with a portable entry name | Linux fixture and CLI-tested |
 | zip-create-directory | Regular files in a directory tree to Deflate ZIP; empty directories and filesystem metadata omitted | Linux round-trip fixture-tested |
 | zip-extract-all | Bounded regular files/directories to a new folder; links, traversal and collisions rejected | Linux round-trip and malicious-path fixture-tested |
-| gzip-create | One regular file compressed to a new `.gz` stream; source and output bounded to 1 GiB | Implemented with bounded streaming, no-overwrite output and cancellation; hosted verification pending |
-| gzip-extract | Concatenated GZIP members to a new selected file; CRC checked; expanded output capped at 1 GiB | Implemented; round-trip, corrupt-CRC, truncated-stream and expansion-limit tests added; hosted verification pending |
-| gzip-test | Validate GZIP stream to a sink without publishing extracted bytes | Implemented; tests added; hosted verification pending |
+| gzip-create | One regular file compressed to a new `.gz` stream; source and output bounded to 1 GiB | Check, Integration, five-target Native, Distribution preview and dependency review passed at `93ddde8` |
+| gzip-extract | Concatenated GZIP members to a new selected file; CRC checked; expanded output capped at 1 GiB | Check, Integration, five-target Native, Distribution preview and dependency review passed at `93ddde8` |
+| gzip-test | Validate GZIP stream to a sink without publishing extracted bytes | Check, Integration, five-target Native, Distribution preview and dependency review passed at `93ddde8` |
+| tar-list | Bounded POSIX/GNU TAR path and size listing; payloads are not read | Implemented; tests added; hosted verification pending |
+| tar-test | Validate TAR headers and fully read regular members; TAR has no payload checksum | Implemented; tests added; hosted verification pending |
+| tar-create-directory | Bounded uncompressed TAR creation from regular files; filesystem metadata omitted | Implemented; tests added; hosted verification pending |
+| tar-extract-entry / tar-extract-all | Selected-file or new-directory extraction of regular files/directories; traversal, links, special entries and overwrite rejected | Implemented; tests added; hosted verification pending |
 | manifest-create / manifest-verify | Versioned SHA-256 manifest using root-relative Unicode paths | Linux match/change/missing and traversal fixtures tested |
 | age-keygen | Generate an X25519 age identity; private identity is saved to a new key file | Linux fixture and owner-only Unix permissions tested |
 | age-encrypt / age-decrypt | Stream age X25519 file encryption and authenticated decryption, up to 4 GiB | Linux round-trip, wrong-key, tampering, collision and symlink fixtures tested |
