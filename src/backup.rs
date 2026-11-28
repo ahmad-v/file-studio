@@ -548,7 +548,7 @@ fn plan_archive<R: Read + std::io::Seek>(
     let mut directories = 0usize;
     for entry in manifest.entries {
         job.check()?;
-        let normalized = super::archive_name(&entry.path, entry.kind == EntryKind::Directory)?
+        let normalized = super::archive_name(&entry.path, entry.kind == EntryKind::Directory)
             .map_err(|_| Error::input("Backup manifest contains an unsafe path"))?;
         if super::portable_relative(&normalized)? != entry.path || entry.path.len() > MAX_PATH {
             return Err(Error::input("Backup manifest path is not canonical"));
