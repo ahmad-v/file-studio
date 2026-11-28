@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use file_studio::catalogue_workspace::{
-    display_path, format_bytes, CatalogueFile, DuplicateReport, HistoryReport, ScanSummary,
-    SearchReport,
+    display_path, format_bytes, usage_fraction, CatalogueFile, DirectoryUsageReport,
+    DuplicateReport, HistoryReport, ScanSummary, SearchReport,
 };
 use futures::channel::oneshot;
 use iced::{
@@ -115,6 +115,7 @@ enum RequestKind {
     Search,
     History,
     Refresh,
+    Usage,
     CompareSnapshots,
     Duplicates,
     InspectSelection,
@@ -129,10 +130,16 @@ struct ProgressPresentation {
 
 fn progress_presentation(kind: RequestKind, fraction: Option<f32>) -> ProgressPresentation {
     match (kind, fraction) {
-        (RequestKind::Refresh | RequestKind::CreateCatalogue, None) => ProgressPresentation {
-            label: "Scanning folder; progress is indeterminate.".into(),
-            fraction: None,
-        },
+        (RequestKind::Refresh | RequestKind::CreateCatalogue | RequestKind::Usage, None) => {
+            ProgressPresentation {
+                label: if kind == RequestKind::Usage {
+                    "Analyzing folder sizes; progress is indeterminate.".into()
+                } else {
+                    "Scanning folder; progress is indeterminate.".into()
+                },
+                fraction: None,
+            }
+        }
         (RequestKind::Refresh, Some(fraction)) => ProgressPresentation {
             label: format!(
                 "Saving catalogue snapshot: {:.0}% complete",
@@ -276,6 +283,7 @@ struct StudioUi {
     history_truncated: bool,
     duplicate_report: Option<DuplicateReport>,
     duplicate_page_index: usize,
+    usage_report: Option<DirectoryUsageReport>,
     compare_before: String,
     compare_after: String,
     comparison_report: Option<String>,
@@ -312,6 +320,7 @@ enum Message {
     SearchTableAction(TableAction),
     LoadHistory,
     Refresh,
+    AnalyzeUsage,
     FindDuplicates,
     CompareSnapshots,
     HistoryTableAction(TableAction),
@@ -377,6 +386,7 @@ impl StudioUi {
             history_truncated: false,
             duplicate_report: None,
             duplicate_page_index: 0,
+            usage_report: None,
             compare_before: String::new(),
             compare_after: String::new(),
             comparison_report: None,
@@ -430,6 +440,7 @@ impl StudioUi {
                 self.root_selection = None;
                 self.duplicate_report = None;
                 self.duplicate_page_index = 0;
+                self.usage_report = None;
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
@@ -526,6 +537,7 @@ impl StudioUi {
                     self.root_selection = Some(path);
                     self.duplicate_report = None;
                     self.duplicate_page_index = 0;
+                    self.usage_report = None;
                     self.inspection_path = None;
                     self.inspection_catalogued_bytes = None;
                     self.inspection_report = None;
@@ -536,6 +548,7 @@ impl StudioUi {
             Message::LoadHistory => return self.start_history(),
             Message::Refresh => return self.start_refresh(),
             Message::FindDuplicates => return self.start_duplicate_review(),
+            Message::AnalyzeUsage => return self.start_directory_usage(),
             Message::CompareBefore(value) => self.compare_before = value,
             Message::CompareAfter(value) => self.compare_after = value,
             Message::CompareSnapshots => return self.start_snapshot_comparison(),
@@ -637,6 +650,7 @@ impl StudioUi {
                         match kind {
                             RequestKind::Operation => self.operation_preview = error.message,
                             RequestKind::Duplicates => self.duplicate_report = None,
+                            RequestKind::Usage => self.usage_report = None,
                             RequestKind::InspectSelection => {
                                 self.inspection_report =
                                     Some(format!("Inspection failed: {}", error.message));
@@ -708,6 +722,7 @@ impl StudioUi {
         }
         self.duplicate_report = None;
         self.duplicate_page_index = 0;
+        self.usage_report = None;
         let request = Request {
             operation: "workspace-catalog-refresh".into(),
             input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
@@ -733,6 +748,23 @@ impl StudioUi {
             ..Request::default()
         };
         self.submit(RequestKind::Duplicates, request)
+    }
+
+    fn start_directory_usage(&mut self) -> Task<Message> {
+        if self.job.is_some() {
+            return Task::none();
+        }
+        if self.root_path.trim().is_empty() {
+            self.status = "Choose a source folder before analyzing directory usage.".into();
+            return Task::none();
+        }
+        self.usage_report = None;
+        let request = Request {
+            operation: "directory-usage".into(),
+            input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
+            ..Request::default()
+        };
+        self.submit(RequestKind::Usage, request)
     }
 
     fn search_table_action(&mut self, action: TableAction) {
@@ -1004,6 +1036,20 @@ impl StudioUi {
                     self.status = format!("Could not display duplicate candidates: {error}");
                 }
             },
+            RequestKind::Usage => match DirectoryUsageReport::parse(&outcome.preview) {
+                Ok(report) => {
+                    self.status = format!(
+                        "Analyzed {} regular files totaling {}. Filesystem contents were read only.",
+                        report.regular_files,
+                        format_bytes(report.total_bytes.into())
+                    );
+                    self.usage_report = Some(report);
+                }
+                Err(error) => {
+                    self.usage_report = None;
+                    self.status = format!("Could not display directory usage: {error}");
+                }
+            },
             RequestKind::History => match HistoryReport::parse(&outcome.preview) {
                 Ok(report) => {
                     self.history = report.scans;
@@ -1269,6 +1315,10 @@ impl StudioUi {
                     && !self.root_path.trim().is_empty())
                 .then_some(Message::Refresh)
             ),
+            button("Analyze directory usage").on_press_maybe(
+                (self.job.is_none() && !self.root_path.trim().is_empty())
+                    .then_some(Message::AnalyzeUsage)
+            ),
             button("Find duplicate candidates").on_press_maybe(
                 (self.job.is_none() && !self.root_path.trim().is_empty())
                     .then_some(Message::FindDuplicates)
@@ -1277,6 +1327,62 @@ impl StudioUi {
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .wrap();
+
+        let usage_view: Element<'_, Message> = if let Some(report) = &self.usage_report {
+            let mut entries = report
+                .directories
+                .iter()
+                .map(|(name, bytes)| (name.clone(), *bytes))
+                .collect::<Vec<_>>();
+            if report.root_bytes > 0 {
+                entries.push(("(files in selected root)".into(), report.root_bytes));
+            }
+            entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            let mut chart = column![
+                text("Directory usage by top-level folder").size(20),
+                text(format!(
+                    "{} regular files · {} total · bars show each share of the total",
+                    report.regular_files,
+                    format_bytes(report.total_bytes.into())
+                )),
+            ]
+            .spacing(6);
+            if entries.is_empty() {
+                chart = chart.push(text("The selected folder contains no regular files."));
+            }
+            for (name, bytes) in entries.iter().take(20) {
+                let fraction = usage_fraction(*bytes, report.total_bytes);
+                chart = chart.push(
+                    column![
+                        row![
+                            text(display_path(name)).width(Length::Fill),
+                            text(format!(
+                                "{} · {:.1}%",
+                                format_bytes((*bytes).into()),
+                                fraction * 100.0
+                            )),
+                        ]
+                        .spacing(8),
+                        progress_bar(0.0..=1.0, fraction),
+                    ]
+                    .spacing(3),
+                );
+            }
+            if entries.len() > 20 {
+                chart = chart.push(text(format!(
+                    "Showing the 20 largest groups; {} more omitted from the preview.",
+                    entries.len() - 20
+                )));
+            }
+            scrollable(chart).height(Length::Fixed(260.0)).into()
+        } else {
+            column![
+                text("Directory usage").size(20),
+                text("Choose a source folder and analyze its top-level file sizes.")
+            ]
+            .spacing(6)
+            .into()
+        };
 
         let result_table: Element<'_, Message> = match (&self.search_results, &self.search_table) {
             (Some(results), Some(_)) if results.files.is_empty() => column![
@@ -1459,6 +1565,7 @@ impl StudioUi {
                 refresh_row,
                 create_row,
                 result_table,
+                usage_view,
                 inspector,
                 duplicate_view,
                 history_table,
@@ -1537,6 +1644,7 @@ fn request_title(kind: RequestKind) -> &'static str {
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
+        RequestKind::Usage => "Directory usage analysis",
         RequestKind::Duplicates => "Duplicate candidate scan",
         RequestKind::CompareSnapshots => "Snapshot comparison",
         RequestKind::InspectSelection => "Selected file inspection",
