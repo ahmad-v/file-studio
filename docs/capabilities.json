@@ -171,8 +171,10 @@
       "operation": "catalog-backup",
       "description": "Create a SQLite online backup of a File Studio catalogue; validate integrity and atomically publish to a new path without overwrite, returning SHA-256",
       "status": "implemented-unverified",
-      "targets": ["x86_64-unknown-linux-gnu"],
-      "fixture_status": "Added source-preservation, historical snapshot, integrity and no-overwrite tests; local verification pending"
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Local Rust 1.89 default-GUI suite and strict Clippy passed. Hosted Check 46179170898, Integration 46179329503 (including native window launch smoke) and all five Native targets 46179329576 passed. Verifies retained scan history, SQLite integrity, cancellation, symlink refusal and byte-preserving no-overwrite. Backs up catalogue metadata/history, not source files."
     },
     {
       "operation": "catalog-compare-snapshots",
