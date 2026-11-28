@@ -90,13 +90,13 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Search a saved file inventory",
         hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
-    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Unix filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline." },
+    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies additions, removals and changes only when the stable source identity matches; changed includes size or available modification-time differences. Unknown or changed identities are stored as a full-rescan baseline. Inaccessible paths produce a partial report and preserve the previous catalogue history." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation { id: "catalog-compare-snapshots", label: "Compare catalogue snapshots", hint: "Input a saved File Studio .sqlite catalogue. Parameter JSON: {\"before_scan_id\":1,\"after_scan_id\":2}. Compares two retained snapshots without accessing the source volume." },
     Operation {
         id: "scan",
         label: "Scan",
-        hint: "Read-only recursive directory inventory. Output new JSON, CSV or .sqlite catalogue; symbolic links are skipped.",
+        hint: "Read-only recursive directory inventory. Output JSON, CSV or .sqlite; if inaccessible paths make the scan partial, only a marked JSON report is saved. Partial scans are never used for catalogue refresh or removal counts. Symbolic links are skipped.",
     },
 ];
 fn identify(b: &[u8]) -> &'static str {
@@ -115,6 +115,15 @@ fn identify(b: &[u8]) -> &'static str {
     } else {
         "unknown"
     }
+}
+fn modified_unix_ms(value: std::io::Result<std::time::SystemTime>) -> Option<i64> {
+    use std::time::UNIX_EPOCH;
+    let time = value.ok()?;
+    let milliseconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_millis()).ok()?,
+        Err(error) => -i128::try_from(error.duration().as_nanos().div_ceil(1_000_000)).ok()?,
+    };
+    i64::try_from(milliseconds).ok()
 }
 fn file_times(path: &Path) -> Result<Value> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -702,7 +711,7 @@ fn zip_create_directory(input: &Path, output: &Path, job: &Job) -> Result<Value>
         return Err(Error::input("Choose a non-symlink directory"));
     }
     let root = fs::canonicalize(input)?;
-    let rows = scan(&root, job)?;
+    let rows = scan(&root, job)?.into_complete_files()?;
     if rows.len() > 4096 {
         return Err(Error::new(
             ErrorKind::Limit,
@@ -806,7 +815,49 @@ fn list_zip(p: &Path, job: &Job) -> Result<Value> {
     Ok(json!({"schema_version":1,"entries":entries}))
 }
 
-fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
+struct ScanReport {
+    files: Vec<Value>,
+    warnings: Vec<String>,
+    omitted_warnings: usize,
+    complete: bool,
+}
+
+impl ScanReport {
+    fn mark_incomplete(&mut self, root: &Path, path: Option<&Path>, error: impl std::fmt::Display) {
+        self.complete = false;
+        let display_path = path
+            .and_then(|path| path.strip_prefix(root).ok())
+            .and_then(Path::to_str)
+            .filter(|path| !path.is_empty())
+            .unwrap_or("<directory entry>");
+        if self.warnings.len() < 128 {
+            self.warnings.push(format!("{display_path}: {error}"));
+        } else {
+            self.omitted_warnings += 1;
+        }
+    }
+
+    fn into_complete_files(self) -> Result<Vec<Value>> {
+        if !self.complete {
+            return Err(Error::input(format!(
+                "Directory scan was incomplete; {} file entries were found and the incomplete inventory was not used. First issue: {}",
+                self.files.len(),
+                self.warnings.first().map(String::as_str).unwrap_or("unknown traversal error")
+            )));
+        }
+        Ok(self.files)
+    }
+
+    fn report_value(&self) -> Value {
+        if self.complete {
+            json!({"schema_version":1,"files":self.files})
+        } else {
+            json!({"schema_version":2,"complete":false,"files":self.files,"warnings":self.warnings,"omitted_warnings":self.omitted_warnings})
+        }
+    }
+}
+
+fn scan(root: &Path, j: &Job) -> Result<ScanReport> {
     // The number of files is unknown until traversal completes, so expose this phase
     // as indeterminate rather than treating the safety limit as a completion estimate.
     j.progress(0, 0);
@@ -815,21 +866,47 @@ fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
         return Err(Error::input("Choose a non-symlink directory"));
     }
     let mut stack = vec![(root.to_path_buf(), 0)];
-    let mut rows = vec![];
+    let mut report = ScanReport {
+        files: vec![],
+        warnings: vec![],
+        omitted_warnings: 0,
+        complete: true,
+    };
     let mut count = 0usize;
-    while let Some((dir, depth)) = stack.pop() {
+    'walk: while let Some((dir, depth)) = stack.pop() {
         j.check()?;
         if depth > 64 {
-            return Err(Error::input("Directory depth exceeds 64"));
+            report.mark_incomplete(root, Some(&dir), "maximum directory depth of 64 exceeded");
+            continue;
         }
-        for entry in fs::read_dir(dir)? {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                report.mark_incomplete(root, Some(&dir), error);
+                continue;
+            }
+        };
+        for entry in entries {
             j.check()?;
-            let e = entry?;
+            let e = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    report.mark_incomplete(root, Some(&dir), error);
+                    continue;
+                }
+            };
             let p = e.path();
-            let m = fs::symlink_metadata(&p)?;
+            let m = match fs::symlink_metadata(&p) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    report.mark_incomplete(root, Some(&p), error);
+                    continue;
+                }
+            };
             count += 1;
             if count > 10000 {
-                return Err(Error::input("Scan limit: 10,000 entries"));
+                report.mark_incomplete(root, Some(&dir), "scan stopped at the 10,000-entry limit");
+                break 'walk;
             }
             if m.file_type().is_symlink() {
                 continue;
@@ -840,15 +917,22 @@ fn scan(root: &Path, j: &Job) -> Result<Vec<Value>> {
                 let relative = p
                     .strip_prefix(root)
                     .map_err(|_| Error::input("Path escaped scan root"))?;
-                let relative = relative.to_str().ok_or_else(|| {
-                    Error::input("Non-Unicode path cannot be represented in report")
-                })?;
-                rows.push(json!({"path":relative,"bytes":m.len()}));
+                if let Some(relative) = relative.to_str() {
+                    report.files.push(json!({"path":relative,"bytes":m.len(),"modified_unix_ms":modified_unix_ms(m.modified())}));
+                } else {
+                    report.mark_incomplete(
+                        root,
+                        Some(&p),
+                        "path is not valid Unicode and cannot be represented",
+                    );
+                }
             }
         }
     }
-    rows.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    Ok(rows)
+    report
+        .files
+        .sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    Ok(report)
 }
 
 #[derive(Deserialize)]
@@ -868,7 +952,7 @@ struct ManifestFile {
 }
 
 fn manifest_create(root: &Path, job: &Job) -> Result<Value> {
-    let rows = scan(root, job)?;
+    let rows = scan(root, job)?.into_complete_files()?;
     let mut total = 0u64;
     let mut files = Vec::with_capacity(rows.len());
     for row in rows {
@@ -992,7 +1076,7 @@ fn directory_usage(root: &Path, job: &Job) -> Result<Value> {
     let mut total = 0u64;
     let mut root_bytes = 0u64;
     let mut directories = std::collections::BTreeMap::<String, u64>::new();
-    let files = scan(root, job)?;
+    let files = scan(root, job)?.into_complete_files()?;
     for file in &files {
         job.check()?;
         let bytes = file["bytes"].as_u64().expect("scan reports a byte count");
@@ -1019,7 +1103,7 @@ fn directory_usage(root: &Path, job: &Job) -> Result<Value> {
 }
 
 fn duplicate_candidates(root: &Path, job: &Job) -> Result<Value> {
-    let files = scan(root, job)?;
+    let files = scan(root, job)?.into_complete_files()?;
     let mut sizes = std::collections::BTreeMap::<u64, Vec<&str>>::new();
     for file in &files {
         job.check()?;
@@ -1201,14 +1285,43 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         "catalog-history" => catalog::history(&r.input, &j)?,
         "catalog-compare-snapshots" => catalog::compare_snapshots(&r.input, &r.parameter, &j)?,
         "catalog-refresh" => {
-            let files = scan(&r.input, &j)?;
+            let report = scan(&r.input, &j)?;
+            if !report.complete {
+                let warning = format!(
+                    "Catalogue refresh was not saved because traversal was incomplete. {} issue(s) were recorded; no removed-file counts were inferred.",
+                    report.warnings.len() + report.omitted_warnings
+                );
+                return Ok(Outcome {
+                    preview: serde_json::to_string_pretty(&report.report_value())?,
+                    warnings: vec![warning],
+                    ..Outcome::default()
+                });
+            }
+            let files = report.files;
             catalog::refresh(Path::new(&r.parameter), &r.input, &files, &j)?
         }
-        "scan" => json!({"schema_version":1,"files":scan(&r.input,&j)?}),
+        "scan" => scan(&r.input, &j)?.report_value(),
         _ => return Err(Error::input("Unknown operation")),
     };
     let mut written = None;
     let mut encoded = serde_json::to_string_pretty(&value)?;
+    let incomplete_scan = r.operation == "scan" && value["complete"] == false;
+    if incomplete_scan
+        && !r.output.as_os_str().is_empty()
+        && !r
+            .output
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        return Ok(Outcome {
+            preview: encoded,
+            warnings: vec![
+                "The scan is incomplete. It was not saved as CSV or SQLite because those formats cannot carry the required completeness marker. Save the marked JSON report to retain the partial results.".into(),
+            ],
+            ..Outcome::default()
+        });
+    }
     if !r.output.as_os_str().is_empty() {
         j.check()?;
         match r.output.extension().and_then(|s| s.to_str()) {
@@ -1233,6 +1346,11 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                     && (extension.eq_ignore_ascii_case("sqlite")
                         || extension.eq_ignore_ascii_case("sqlite3")) =>
             {
+                if incomplete_scan {
+                    return Err(Error::input(
+                        "An incomplete scan cannot be saved as a SQLite catalogue",
+                    ));
+                }
                 let files = value["files"]
                     .as_array()
                     .ok_or_else(|| Error::input("Scan report has no file list"))?;
@@ -1257,7 +1375,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     Ok(Outcome {
         preview,
         written,
-        warnings: vec![if r.operation == "verify" {
+        warnings: vec![if incomplete_scan {
+            "This is a partial scan (schema version 2). It contains inaccessible or skipped paths and must not be used to infer removed files. SQLite refresh was not attempted; JSON inventory loaders reject incomplete reports.".into()
+        } else if r.operation == "verify" {
             "A match verifies integrity against the supplied checksum. Use a trusted source for the checksum.".into()
         } else if r.operation == "inspect" {
             "The hexadecimal sample contains original file bytes and may be sensitive. Signature identification is limited; PNG chunk inspection does not decode metadata values.".into()
@@ -1317,12 +1437,23 @@ pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
         return Err(Error::input("Choose an existing SQLite catalogue"));
     }
     let files = scan(&r.input, &j)?;
-    let report = catalog::refresh(&r.output, &r.input, &files, &j)?;
+    if !files.complete {
+        let warning = format!(
+            "Catalogue refresh was not saved because traversal was incomplete. {} issue(s) were recorded; no removed-file counts were inferred.",
+            files.warnings.len() + files.omitted_warnings
+        );
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&files.report_value())?,
+            warnings: vec![warning],
+            ..Outcome::default()
+        });
+    }
+    let report = catalog::refresh(&r.output, &r.input, &files.files, &j)?;
     Ok(Outcome {
         preview: serde_json::to_string_pretty(&report)?,
         written: Some(r.output),
         warnings: vec![
-            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts are inferred only when the stable source identity matches; otherwise no cross-source comparison is claimed.".into(),
+            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts use file size and available modification times only when stable source identity matches; content changes preserving both attributes may be missed. Otherwise no cross-source comparison is claimed.".into(),
         ],
         ..Outcome::default()
     })
@@ -1394,7 +1525,7 @@ mod tests {
         assert_eq!(v["sha512"], sha512);
         let result = verify(&p, &format!("sha512={sha512}"), &Job::new()).unwrap();
         assert_eq!(result["matched"], true);
-        assert_eq!(scan(d.path(), &Job::new()).unwrap().len(), 1);
+        assert_eq!(scan(d.path(), &Job::new()).unwrap().files.len(), 1);
         let output = d.path().join("report.csv");
         handle(
             Request {
@@ -1407,6 +1538,58 @@ mod tests {
         )
         .unwrap();
         assert!(fs::read_to_string(output).unwrap().contains("é.txt,3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_subtree_is_reported_and_never_becomes_a_removal_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("volume");
+        let denied = root.join("private");
+        let database = directory.path().join("volume.sqlite");
+        let partial_inventory = directory.path().join("partial.json");
+        fs::create_dir_all(&denied).unwrap();
+        fs::write(root.join("visible.txt"), b"visible").unwrap();
+        fs::write(denied.join("secret.txt"), b"secret").unwrap();
+
+        let baseline = scan(&root, &Job::new()).unwrap();
+        assert!(baseline.complete);
+        catalog::create(&root, &baseline.files, &database, &Job::new()).unwrap();
+
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&denied).is_ok() {
+            // Root can bypass mode-bit restrictions; retain the test on ordinary CI
+            // users, where this represents an inaccessible child directory.
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let outcome = handle_workspace(
+            Request {
+                operation: "workspace-catalog-refresh".into(),
+                input: root.clone(),
+                output: database.clone(),
+                ..Request::default()
+            },
+            Job::new(),
+        )
+        .unwrap();
+        let partial: Value = serde_json::from_str(&outcome.preview).unwrap();
+        assert_eq!(partial["schema_version"], 2);
+        assert_eq!(partial["complete"], false);
+        assert_eq!(partial["files"].as_array().unwrap().len(), 1);
+        assert!(partial["warnings"][0].as_str().unwrap().contains("private"));
+        assert!(outcome.written.is_none());
+        assert!(outcome.warnings[0].contains("not saved"));
+
+        let history = catalog::history(&database, &Job::new()).unwrap();
+        assert_eq!(history["scans"].as_array().unwrap().len(), 1);
+        fs::write(&partial_inventory, &outcome.preview).unwrap();
+        assert!(catalog::search(&partial_inventory, "visible", &Job::new()).is_err());
+
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
@@ -1684,7 +1867,7 @@ mod tests {
         fs::write(root.join("nested/report.txt"), b"inspect this file").unwrap();
         fs::write(&outside, b"outside the source").unwrap();
 
-        let rows = scan(&root, &Job::new()).unwrap();
+        let rows = scan(&root, &Job::new()).unwrap().files;
         let saved_relative_path = rows[0]["path"].as_str().unwrap().to_owned();
         let inspected = handle_workspace(
             Request {
@@ -1762,7 +1945,7 @@ mod tests {
         drop(db);
         assert!(catalog::history(&wrong_page_size, &Job::new()).is_err());
         let inside = root.join("catalog.sqlite");
-        let rows = scan(&root, &Job::new()).unwrap();
+        let rows = scan(&root, &Job::new()).unwrap().files;
         assert!(catalog::create(&root, &rows, &inside, &Job::new()).is_err());
         assert!(!inside.exists());
     }

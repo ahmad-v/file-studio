@@ -1089,7 +1089,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2104,7 +2104,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "localwright-core"
 version = "0.1.0"
-source = "git+https://github.com/ahmad-v/localwright?rev=6c73d43a419189c276623c3b083f7ffb208c24a6#6c73d43a419189c276623c3b083f7ffb208c24a6"
+source = "git+https://github.com/ahmad-v/localwright?rev=cd563802bb5ce4de7cc3d7b9d8cbef5d36ce73b1#cd563802bb5ce4de7cc3d7b9d8cbef5d36ce73b1"
 dependencies = [
  "command-group",
  "serde",
@@ -2116,7 +2116,7 @@ dependencies = [
 [[package]]
 name = "localwright-ui"
 version = "0.1.0"
-source = "git+https://github.com/ahmad-v/localwright?rev=6c73d43a419189c276623c3b083f7ffb208c24a6#6c73d43a419189c276623c3b083f7ffb208c24a6"
+source = "git+https://github.com/ahmad-v/localwright?rev=cd563802bb5ce4de7cc3d7b9d8cbef5d36ce73b1#cd563802bb5ce4de7cc3d7b9d8cbef5d36ce73b1"
 dependencies = [
  "futures",
  "iced",
@@ -3192,7 +3192,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3874,7 +3874,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4295,7 +4295,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

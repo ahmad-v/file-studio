@@ -10,7 +10,7 @@ use std::{
 };
 
 const CATALOG_APPLICATION_ID: i64 = 0x4c57_5243;
-const CATALOG_SCHEMA_VERSION: i64 = 2;
+const CATALOG_SCHEMA_VERSION: i64 = 3;
 const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PATH_BYTES: i32 = 64 * 1024;
 
@@ -116,6 +116,15 @@ fn open_catalog(path: &Path, writable: bool) -> Result<Connection> {
         )
         .map_err(sqlite_error)?;
     }
+    if writable && version <= 2 {
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE files ADD COLUMN modified_unix_ms INTEGER;
+             PRAGMA user_version=3;
+             COMMIT;",
+        )
+        .map_err(sqlite_error)?;
+    }
     Ok(db)
 }
 
@@ -171,17 +180,22 @@ fn reconcile(
     }
     let old = before
         .iter()
-        .map(|entry| (entry.path.as_str(), entry.bytes))
+        .map(|entry| (entry.path.as_str(), (entry.bytes, entry.modified_unix_ms)))
         .collect::<BTreeMap<_, _>>();
     let new = after
         .iter()
-        .map(|entry| (entry.path.as_str(), entry.bytes))
+        .map(|entry| (entry.path.as_str(), (entry.bytes, entry.modified_unix_ms)))
         .collect::<BTreeMap<_, _>>();
     let added = new.keys().filter(|path| !old.contains_key(**path)).count();
     let removed = old.keys().filter(|path| !new.contains_key(**path)).count();
     let changed = new
         .iter()
-        .filter(|(path, bytes)| old.get(**path).is_some_and(|old_bytes| old_bytes != *bytes))
+        .filter(|(path, current)| {
+            old.get(**path).is_some_and(|previous| {
+                previous.0 != current.0
+                    || matches!((previous.1, current.1), (Some(before), Some(after)) if before != after)
+            })
+        })
         .count();
     Delta {
         mode: "same-source",
@@ -231,7 +245,9 @@ fn insert_scan(
     let mut total_bytes = 0u128;
     {
         let mut insert = transaction
-            .prepare("INSERT INTO files(scan_id, path, bytes) VALUES(?1, ?2, ?3)")
+            .prepare(
+                "INSERT INTO files(scan_id, path, bytes, modified_unix_ms) VALUES(?1, ?2, ?3, ?4)",
+            )
             .map_err(sqlite_error)?;
         let total = u64::try_from(files.len())
             .map_err(|_| Error::input("Catalogue row count is out of range"))?;
@@ -243,8 +259,9 @@ fn insert_scan(
             let bytes = file["bytes"]
                 .as_u64()
                 .ok_or_else(|| Error::input("Scan report contains an invalid file size"))?;
+            let modified_unix_ms = file["modified_unix_ms"].as_i64();
             insert
-                .execute((scan_id, relative, bytes.to_string()))
+                .execute((scan_id, relative, bytes.to_string(), modified_unix_ms))
                 .map_err(sqlite_error)?;
             let completed = u64::try_from(index + 1)
                 .map_err(|_| Error::input("Catalogue progress is out of range"))?;
@@ -266,25 +283,39 @@ fn insert_scan(
 }
 
 fn snapshot(db: &Connection, scan_id: i64, job: &Job) -> Result<Vec<Entry>> {
-    let mut statement = db
-        .prepare("SELECT path, bytes FROM files WHERE scan_id=?1 ORDER BY path")
+    let has_modification_time: i64 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(sqlite_error)?;
+    let query = if has_modification_time >= 3 {
+        "SELECT path, bytes, modified_unix_ms FROM files WHERE scan_id=?1 ORDER BY path"
+    } else {
+        "SELECT path, bytes, NULL FROM files WHERE scan_id=?1 ORDER BY path"
+    };
+    let mut statement = db.prepare(query).map_err(sqlite_error)?;
     let rows = statement
         .query_map([scan_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })
         .map_err(sqlite_error)?;
     let mut files = Vec::new();
     for row in rows {
         job.check()?;
-        let (path, bytes) = row.map_err(sqlite_error)?;
+        let (path, bytes, modified_unix_ms) = row.map_err(sqlite_error)?;
         let bytes = bytes
             .parse::<u64>()
             .map_err(|_| Error::input("Catalogue contains an invalid file size"))?;
         if path.is_empty() || path.contains('\0') {
             return Err(Error::input("Catalogue contains an invalid path"));
         }
-        files.push(Entry { path, bytes });
+        files.push(Entry {
+            path,
+            bytes,
+            modified_unix_ms,
+        });
         if files.len() > 10_000 {
             return Err(Error::new(
                 ErrorKind::Limit,
@@ -314,7 +345,7 @@ pub fn create(root: &Path, files: &[Value], output: &Path, job: &Job) -> Result<
     db.execute_batch(&format!(
         "PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA page_size=4096; PRAGMA max_page_count={}; PRAGMA application_id={}; PRAGMA user_version={};
          CREATE TABLE scans(id INTEGER PRIMARY KEY, scanned_unix_ms INTEGER NOT NULL, root_label TEXT NOT NULL, file_count INTEGER NOT NULL, total_bytes TEXT NOT NULL, source_id TEXT, comparison_mode TEXT NOT NULL, added_count INTEGER NOT NULL, changed_count INTEGER NOT NULL, removed_count INTEGER NOT NULL);
-         CREATE TABLE files(scan_id INTEGER NOT NULL REFERENCES scans(id), path TEXT NOT NULL, bytes TEXT NOT NULL, PRIMARY KEY(scan_id,path)) WITHOUT ROWID;
+         CREATE TABLE files(scan_id INTEGER NOT NULL REFERENCES scans(id), path TEXT NOT NULL, bytes TEXT NOT NULL, modified_unix_ms INTEGER, PRIMARY KEY(scan_id,path)) WITHOUT ROWID;
          CREATE INDEX files_path ON files(path);",
         MAX_CATALOG_BYTES / 4096,
         CATALOG_APPLICATION_ID,
@@ -399,6 +430,7 @@ pub fn refresh(path: &Path, root: &Path, files: &[Value], job: &Job) -> Result<V
                 bytes: file["bytes"]
                     .as_u64()
                     .ok_or_else(|| Error::input("Scan report contains an invalid file size"))?,
+                modified_unix_ms: file["modified_unix_ms"].as_i64(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -598,6 +630,13 @@ fn indexed_scan(db: &Connection, scan_id: i64, job: &Job) -> Result<BTreeMap<Str
 struct Inventory {
     schema_version: u32,
     files: Vec<Entry>,
+    #[serde(default)]
+    complete: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "warnings")]
+    _warnings: Vec<String>,
+    #[serde(default, rename = "omitted_warnings")]
+    _omitted_warnings: usize,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -605,6 +644,8 @@ struct Inventory {
 struct Entry {
     path: String,
     bytes: u64,
+    #[serde(default, skip_serializing)]
+    modified_unix_ms: Option<i64>,
 }
 
 pub fn search(catalog: &Path, parameter: &str, job: &Job) -> Result<Value> {
@@ -640,7 +681,14 @@ fn load(catalog: &Path, job: &Job) -> Result<Inventory> {
     let bytes = read_bounded(catalog, 16 * 1024 * 1024)?;
     job.check()?;
     let inventory: Inventory = serde_json::from_slice(&bytes)?;
-    if inventory.schema_version != 1 {
+    if inventory.schema_version == 2 && inventory.complete == Some(false) {
+        return Err(Error::input(
+            "This scan is incomplete and cannot be searched or compared as a full inventory",
+        ));
+    }
+    if inventory.schema_version != 1
+        && !(inventory.schema_version == 2 && inventory.complete == Some(true))
+    {
         return Err(Error::input("Unsupported inventory version"));
     }
     if inventory.files.len() > MAX_ENTRIES {
@@ -710,6 +758,7 @@ mod tests {
             .map(|(path, bytes)| Entry {
                 path: (*path).to_owned(),
                 bytes: *bytes,
+                modified_unix_ms: None,
             })
             .collect()
     }
@@ -728,6 +777,56 @@ mod tests {
         );
         assert_eq!(delta.mode, "same-source");
         assert_eq!((delta.added, delta.changed, delta.removed), (1, 1, 1));
+    }
+
+    #[test]
+    fn same_size_files_with_changed_modification_times_are_classified_changed() {
+        let before = vec![Entry {
+            path: "report.pdf".into(),
+            bytes: 128,
+            modified_unix_ms: Some(1_000),
+        }];
+        let after = vec![Entry {
+            path: "report.pdf".into(),
+            bytes: 128,
+            modified_unix_ms: Some(2_000),
+        }];
+        let delta = reconcile(
+            Some("unix-dev:42-ino:6"),
+            Some("unix-dev:42-ino:6"),
+            &before,
+            &after,
+        );
+        assert_eq!(delta.mode, "same-source");
+        assert_eq!((delta.added, delta.changed, delta.removed), (0, 1, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_persists_modification_times_for_same_size_change_detection() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let catalogue = directory.path().join("catalogue.sqlite");
+        create(
+            &root,
+            &[json!({"path":"report.pdf","bytes":128,"modified_unix_ms":1000})],
+            &catalogue,
+            &Job::new(),
+        )
+        .unwrap();
+        let report = refresh(
+            &catalogue,
+            &root,
+            &[json!({"path":"report.pdf","bytes":128,"modified_unix_ms":2000})],
+            &Job::new(),
+        )
+        .unwrap();
+        assert_eq!(report["comparison_mode"], "same-source");
+        assert_eq!(report["changed"], 1);
+        let history = history(&catalogue, &Job::new()).unwrap();
+        assert_eq!(history["schema_version"], 3);
+        assert_eq!(history["scans"][0]["changed"], 1);
     }
 
     #[cfg(unix)]
@@ -805,9 +904,17 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        let legacy_modified_time: Option<i64> = migrated
+            .query_row(
+                "SELECT modified_unix_ms FROM files WHERE scan_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
         assert_eq!(source_id, None);
         assert_eq!(count, 1);
+        assert_eq!(legacy_modified_time, None);
         drop(migrated);
 
         let root = directory.path().join("source");

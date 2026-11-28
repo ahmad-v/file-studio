@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use file_studio::catalogue_workspace::{display_path, format_bytes, HistoryReport, SearchReport};
+use file_studio::catalogue_workspace::{
+    display_path, format_bytes, CatalogueFile, DuplicateReport, HistoryReport, ScanSummary,
+    SearchReport,
+};
 use futures::channel::oneshot;
 use iced::{
     keyboard::{key::Named, Key, Modifiers},
@@ -11,7 +14,9 @@ use iced::{
     Color, Element, Length, Subscription, Task, Theme,
 };
 use localwright_core::{Error, ErrorKind, Handler, Job, Operation, Outcome, Request};
-use localwright_ui::THEMES;
+use localwright_ui::{
+    paginated_table, CellValue, SortDirection, TableAction, TableModel, TableState, THEMES,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fmt, fs,
@@ -21,10 +26,73 @@ use std::{
 };
 
 const SCALES: [u16; 7] = [80, 100, 125, 150, 200, 250, 300];
-const PAGE_SIZE: usize = 100;
+const DUPLICATE_PAGE_SIZE: usize = 20;
 
 fn selected_or_typed(selected: Option<&PathBuf>, typed: &str) -> PathBuf {
     selected.cloned().unwrap_or_else(|| PathBuf::from(typed))
+}
+
+fn search_table_model(rows: &[CatalogueFile]) -> Result<TableModel, String> {
+    let rows = rows
+        .iter()
+        .map(|entry| {
+            vec![
+                CellValue::Text(display_path(&entry.path)),
+                CellValue::UnsignedInteger(entry.bytes),
+            ]
+        })
+        .collect();
+    TableModel::new(vec!["Relative path".into(), "Bytes".into()], rows)
+        .map_err(|error| error.to_string())
+}
+
+fn history_table_model(rows: &[ScanSummary]) -> Result<TableModel, String> {
+    let sizes = rows
+        .iter()
+        .map(|scan| scan.total_bytes.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>();
+    let size_is_numeric = sizes.is_ok();
+    let mut cells = Vec::with_capacity(rows.len());
+    for (index, scan) in rows.iter().enumerate() {
+        let scan_label = format!("#{} · {}", scan.scan_id, display_path(&scan.root_label));
+        let total_bytes = if size_is_numeric {
+            CellValue::UnsignedInteger(sizes.as_ref().expect("validated above")[index])
+        } else {
+            CellValue::Text(scan.total_bytes.clone())
+        };
+        let delta = if scan.comparison_mode == "same-source" {
+            format!("+{} ~{} −{}", scan.added, scan.changed, scan.removed)
+        } else if scan.comparison_mode == "full-rescan" {
+            "Full rescan; identity changed/unknown".to_owned()
+        } else if scan.comparison_mode == "unknown" {
+            "Legacy snapshot; identity unknown".to_owned()
+        } else {
+            "Baseline".to_owned()
+        };
+        cells.push(vec![
+            CellValue::Text(scan_label),
+            CellValue::UnsignedInteger(scan.files as u64),
+            total_bytes,
+            CellValue::Text(delta),
+            CellValue::Integer(scan.scanned_unix_ms),
+        ]);
+    }
+    let bytes_header = if size_is_numeric {
+        "Total bytes"
+    } else {
+        "Total bytes (text)"
+    };
+    TableModel::new(
+        vec![
+            "Scan / source".into(),
+            "Files".into(),
+            bytes_header.into(),
+            "Refresh delta".into(),
+            "Timestamp (UTC ms)".into(),
+        ],
+        cells,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn is_sqlite_catalogue_path(path: &Path) -> bool {
@@ -48,6 +116,7 @@ enum RequestKind {
     History,
     Refresh,
     CompareSnapshots,
+    Duplicates,
     InspectSelection,
     Operation,
 }
@@ -198,15 +267,21 @@ struct StudioUi {
     root_selection: Option<PathBuf>,
     query: String,
     search_results: Option<SearchReport>,
+    search_table: Option<TableModel>,
+    search_table_state: TableState,
     history: Vec<file_studio::catalogue_workspace::ScanSummary>,
+    history_table_rows: Vec<ScanSummary>,
+    history_table: Option<TableModel>,
+    history_table_state: TableState,
     history_truncated: bool,
+    duplicate_report: Option<DuplicateReport>,
+    duplicate_page_index: usize,
     compare_before: String,
     compare_after: String,
     comparison_report: Option<String>,
     inspection_path: Option<String>,
     inspection_catalogued_bytes: Option<u64>,
     inspection_report: Option<String>,
-    page_index: usize,
     selected_operation: String,
     input_path: String,
     input_selection: Option<PathBuf>,
@@ -234,14 +309,17 @@ enum Message {
     BrowseRoot,
     RootPicked(Option<PathBuf>),
     Search,
+    SearchTableAction(TableAction),
     LoadHistory,
     Refresh,
+    FindDuplicates,
     CompareSnapshots,
+    HistoryTableAction(TableAction),
     CompareBefore(String),
     CompareAfter(String),
     InspectCatalogueFile(String),
-    PreviousPage,
-    NextPage,
+    PreviousDuplicatePage,
+    NextDuplicatePage,
     Operation(String),
     Input(String),
     Output(String),
@@ -290,15 +368,21 @@ impl StudioUi {
             root_selection: None,
             query: String::new(),
             search_results: None,
+            search_table: None,
+            search_table_state: TableState::new(50),
             history: Vec::new(),
+            history_table_rows: Vec::new(),
+            history_table: None,
+            history_table_state: TableState::new(20),
             history_truncated: false,
+            duplicate_report: None,
+            duplicate_page_index: 0,
             compare_before: String::new(),
             compare_after: String::new(),
             comparison_report: None,
             inspection_path: None,
             inspection_catalogued_bytes: None,
             inspection_report: None,
-            page_index: 0,
             selected_operation: operations
                 .first()
                 .map_or_else(String::new, |operation| operation.id.to_owned()),
@@ -329,17 +413,23 @@ impl StudioUi {
                 self.catalogue_path = path;
                 self.catalogue_selection = None;
                 self.search_results = None;
+                self.search_table = None;
                 self.history.clear();
+                self.history_table_rows.clear();
+                self.history_table = None;
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
-                self.page_index = 0;
+                self.search_table_state = TableState::new(50);
+                self.history_table_state = TableState::new(20);
                 self.status =
                     "Select a saved catalogue, then search paths or load its history.".into();
             }
             Message::RootPath(path) => {
                 self.root_path = path;
                 self.root_selection = None;
+                self.duplicate_report = None;
+                self.duplicate_page_index = 0;
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
@@ -347,7 +437,8 @@ impl StudioUi {
             Message::Query(query) => {
                 self.query = query;
                 self.search_results = None;
-                self.page_index = 0;
+                self.search_table = None;
+                self.search_table_state = TableState::new(50);
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
@@ -405,7 +496,12 @@ impl StudioUi {
                     self.catalogue_path = path.to_string_lossy().into_owned();
                     self.catalogue_selection = Some(path);
                     self.search_results = None;
+                    self.search_table = None;
                     self.history.clear();
+                    self.history_table_rows.clear();
+                    self.history_table = None;
+                    self.search_table_state = TableState::new(50);
+                    self.history_table_state = TableState::new(20);
                     self.inspection_path = None;
                     self.inspection_catalogued_bytes = None;
                     self.inspection_report = None;
@@ -428,24 +524,31 @@ impl StudioUi {
                 if let Some(path) = path {
                     self.root_path = path.to_string_lossy().into_owned();
                     self.root_selection = Some(path);
+                    self.duplicate_report = None;
+                    self.duplicate_page_index = 0;
                     self.inspection_path = None;
                     self.inspection_catalogued_bytes = None;
                     self.inspection_report = None;
                 }
             }
             Message::Search => return self.start_search(),
+            Message::SearchTableAction(action) => self.search_table_action(action),
             Message::LoadHistory => return self.start_history(),
             Message::Refresh => return self.start_refresh(),
+            Message::FindDuplicates => return self.start_duplicate_review(),
             Message::CompareBefore(value) => self.compare_before = value,
             Message::CompareAfter(value) => self.compare_after = value,
             Message::CompareSnapshots => return self.start_snapshot_comparison(),
+            Message::HistoryTableAction(action) => self.history_table_action(action),
             Message::InspectCatalogueFile(relative) => {
                 return self.start_catalogue_inspection(relative)
             }
-            Message::PreviousPage => self.page_index = self.page_index.saturating_sub(1),
-            Message::NextPage => {
-                if self.page_index + 1 < self.page_count() {
-                    self.page_index += 1;
+            Message::PreviousDuplicatePage => {
+                self.duplicate_page_index = self.duplicate_page_index.saturating_sub(1)
+            }
+            Message::NextDuplicatePage => {
+                if self.duplicate_page_index + 1 < self.duplicate_page_count() {
+                    self.duplicate_page_index += 1;
                 }
             }
             Message::Operation(operation) => self.selected_operation = operation,
@@ -533,6 +636,7 @@ impl StudioUi {
                         self.status = format!("{} failed: {}", request_title(kind), error.message);
                         match kind {
                             RequestKind::Operation => self.operation_preview = error.message,
+                            RequestKind::Duplicates => self.duplicate_report = None,
                             RequestKind::InspectSelection => {
                                 self.inspection_report =
                                     Some(format!("Inspection failed: {}", error.message));
@@ -566,7 +670,9 @@ impl StudioUi {
         self.inspection_path = None;
         self.inspection_catalogued_bytes = None;
         self.inspection_report = None;
-        self.page_index = 0;
+        self.search_results = None;
+        self.search_table = None;
+        self.search_table_state = TableState::new(50);
         let request = Request {
             operation: "catalog-search".into(),
             input: selected_or_typed(self.catalogue_selection.as_ref(), &self.catalogue_path),
@@ -600,6 +706,8 @@ impl StudioUi {
             self.status = "Choose an existing SQLite catalogue and a folder to rescan.".into();
             return Task::none();
         }
+        self.duplicate_report = None;
+        self.duplicate_page_index = 0;
         let request = Request {
             operation: "workspace-catalog-refresh".into(),
             input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
@@ -607,6 +715,114 @@ impl StudioUi {
             ..Request::default()
         };
         self.submit(RequestKind::Refresh, request)
+    }
+
+    fn start_duplicate_review(&mut self) -> Task<Message> {
+        if self.job.is_some() {
+            return Task::none();
+        }
+        if self.root_path.trim().is_empty() {
+            self.status = "Choose the source folder before checking duplicate candidates.".into();
+            return Task::none();
+        }
+        self.duplicate_report = None;
+        self.duplicate_page_index = 0;
+        let request = Request {
+            operation: "duplicates".into(),
+            input: selected_or_typed(self.root_selection.as_ref(), &self.root_path),
+            ..Request::default()
+        };
+        self.submit(RequestKind::Duplicates, request)
+    }
+
+    fn search_table_action(&mut self, action: TableAction) {
+        match action {
+            TableAction::PageChanged(page) => self.search_table_state.set_page(
+                page,
+                self.search_results
+                    .as_ref()
+                    .map_or(0, |report| report.files.len()),
+            ),
+            TableAction::SelectRow(row) => self.search_table_state.select_row(
+                row,
+                self.search_results
+                    .as_ref()
+                    .map_or(0, |report| report.files.len()),
+            ),
+            TableAction::SortBy { column, direction } => {
+                let Some(report) = self.search_results.as_mut() else {
+                    return;
+                };
+                report.files.sort_by(|left, right| {
+                    let order = match column {
+                        0 => left.path.cmp(&right.path),
+                        1 => left.bytes.cmp(&right.bytes),
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if direction == SortDirection::Descending {
+                        order.reverse()
+                    } else {
+                        order
+                    }
+                });
+                self.search_table_state.set_sort(column, direction);
+                self.search_table_state
+                    .select_row(usize::MAX, report.files.len());
+                match search_table_model(&report.files) {
+                    Ok(table) => self.search_table = Some(table),
+                    Err(error) => self.status = format!("Could not sort search results: {error}"),
+                }
+            }
+        }
+    }
+
+    fn history_table_action(&mut self, action: TableAction) {
+        match action {
+            TableAction::PageChanged(page) => self
+                .history_table_state
+                .set_page(page, self.history_table_rows.len()),
+            TableAction::SelectRow(row) => {
+                self.history_table_state
+                    .select_row(row, self.history_table_rows.len());
+                if let Some(scan) = self.history_table_rows.get(row) {
+                    let scan_id = scan.scan_id.to_string();
+                    if self.compare_before.is_empty() || !self.compare_after.is_empty() {
+                        self.compare_before = scan_id;
+                        self.compare_after.clear();
+                    } else {
+                        self.compare_after = scan_id;
+                    }
+                }
+            }
+            TableAction::SortBy { column, direction } => {
+                self.history_table_rows.sort_by(|left, right| {
+                    let ordering = match column {
+                        0 => left.scan_id.cmp(&right.scan_id),
+                        1 => left.files.cmp(&right.files),
+                        2 => left
+                            .total_bytes
+                            .parse::<u128>()
+                            .unwrap_or(u128::MAX)
+                            .cmp(&right.total_bytes.parse::<u128>().unwrap_or(u128::MAX)),
+                        3 => left.comparison_mode.cmp(&right.comparison_mode),
+                        4 => left.scanned_unix_ms.cmp(&right.scanned_unix_ms),
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if direction == SortDirection::Descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                });
+                self.history_table_state.set_sort(column, direction);
+                self.history_table_state
+                    .select_row(usize::MAX, self.history_table_rows.len());
+                match history_table_model(&self.history_table_rows) {
+                    Ok(table) => self.history_table = Some(table),
+                    Err(error) => self.status = format!("Could not sort scan history: {error}"),
+                }
+            }
+        }
     }
 
     fn start_catalogue_inspection(&mut self, relative: String) -> Task<Message> {
@@ -735,33 +951,81 @@ impl StudioUi {
                 self.catalogue_path = path.to_string_lossy().into_owned();
                 self.catalogue_selection = Some(path);
                 self.search_results = None;
+                self.search_table = None;
                 self.history.clear();
+                self.history_table_rows.clear();
+                self.history_table = None;
                 self.history_truncated = false;
                 self.inspection_path = None;
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
-                self.page_index = 0;
+                self.search_table_state = TableState::new(50);
+                self.history_table_state = TableState::new(20);
                 self.status = "Catalogue created. Loading the first scan snapshot…".into();
                 return self.start_history();
             }
             RequestKind::Search => match SearchReport::parse(&outcome.preview) {
                 Ok(report) => {
-                    self.page_index = 0;
                     self.status = format!(
                         "Found {} of {} saved paths. Source storage is not accessed by search.",
                         report.matched_files, report.catalogued_files
                     );
-                    self.search_results = Some(report);
+                    self.search_table_state = TableState::new(50);
+                    match search_table_model(&report.files) {
+                        Ok(table) => {
+                            self.search_table = Some(table);
+                            self.search_results = Some(report);
+                        }
+                        Err(error) => {
+                            self.search_table = None;
+                            self.search_results = None;
+                            self.status = format!("Could not display search results: {error}");
+                        }
+                    }
                 }
-                Err(error) => self.status = format!("Could not display search results: {error}"),
+                Err(error) => {
+                    self.search_table = None;
+                    self.search_results = None;
+                    self.status = format!("Could not display search results: {error}");
+                }
+            },
+            RequestKind::Duplicates => match DuplicateReport::parse(&outcome.preview) {
+                Ok(report) => {
+                    self.duplicate_page_index = 0;
+                    self.status = format!(
+                        "Scanned {} files; found {} groups with matching content hashes. No files were modified.",
+                        report.regular_files_scanned,
+                        report.groups.len()
+                    );
+                    self.duplicate_report = Some(report);
+                }
+                Err(error) => {
+                    self.duplicate_report = None;
+                    self.status = format!("Could not display duplicate candidates: {error}");
+                }
             },
             RequestKind::History => match HistoryReport::parse(&outcome.preview) {
                 Ok(report) => {
                     self.history = report.scans;
                     self.history_truncated = report.truncated;
-                    self.status = format!("Loaded {} recent scan snapshots.", self.history.len());
+                    self.history_table_rows = self.history.clone();
+                    self.history_table_state = TableState::new(20);
+                    match history_table_model(&self.history_table_rows) {
+                        Ok(table) => {
+                            self.history_table = Some(table);
+                            self.status =
+                                format!("Loaded {} recent scan snapshots.", self.history.len());
+                        }
+                        Err(error) => {
+                            self.history_table = None;
+                            self.status = format!("Could not display scan history: {error}");
+                        }
+                    }
                 }
-                Err(error) => self.status = format!("Could not display scan history: {error}"),
+                Err(error) => {
+                    self.history_table = None;
+                    self.status = format!("Could not display scan history: {error}");
+                }
             },
             RequestKind::CompareSnapshots => {
                 let mut preview = outcome.preview;
@@ -776,6 +1040,16 @@ impl StudioUi {
                 self.inspection_catalogued_bytes = None;
                 self.inspection_report = None;
                 self.search_results = None;
+                self.search_table = None;
+                if outcome.written.is_none() {
+                    self.status = "Partial directory scan: catalogue was not updated, and previous scan history was preserved.".into();
+                    let mut preview = outcome.preview;
+                    for warning in outcome.warnings {
+                        preview.push_str(&format!("\nWarning: {warning}"));
+                    }
+                    self.comparison_report = Some(preview);
+                    return Task::none();
+                }
                 self.status = match serde_json::from_str::<serde_json::Value>(&outcome.preview) {
                     Ok(report) if report["comparison_mode"] == "same-source" => format!(
                         "Saved scan {}: {} files, {} total bytes; {} added, {} changed, {} removed. Refreshing history…",
@@ -829,10 +1103,10 @@ impl StudioUi {
         Task::none()
     }
 
-    fn page_count(&self) -> usize {
-        self.search_results
-            .as_ref()
-            .map_or(0, |report| report.files.len().div_ceil(PAGE_SIZE))
+    fn duplicate_page_count(&self) -> usize {
+        self.duplicate_report.as_ref().map_or(0, |report| {
+            report.groups.len().div_ceil(DUPLICATE_PAGE_SIZE)
+        })
     }
 
     fn save_preferences(&mut self) {
@@ -995,64 +1269,45 @@ impl StudioUi {
                     && !self.root_path.trim().is_empty())
                 .then_some(Message::Refresh)
             ),
+            button("Find duplicate candidates").on_press_maybe(
+                (self.job.is_none() && !self.root_path.trim().is_empty())
+                    .then_some(Message::FindDuplicates)
+            ),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .wrap();
 
-        let mut result_table = column![
-            text("Search results").size(20),
-            row![
-                text("Relative path").width(Length::Fill),
-                text("Size").width(Length::Fixed(120.0)),
-                text("Action").width(Length::Fixed(90.0))
+        let result_table: Element<'_, Message> = match (&self.search_results, &self.search_table) {
+            (Some(results), Some(_)) if results.files.is_empty() => column![
+                text("Search results").size(20),
+                text("No saved paths matched this search.")
             ]
-            .spacing(12),
-        ]
-        .spacing(6);
-        if let Some(results) = &self.search_results {
-            let start = self.page_index.saturating_mul(PAGE_SIZE);
-            let end = (start + PAGE_SIZE).min(results.files.len());
-            if results.files.is_empty() {
-                result_table = result_table.push(text("No saved paths matched this search."));
+            .spacing(6)
+            .into(),
+            (Some(results), Some(table)) => {
+                let inspect_selected = self
+                    .search_table_state
+                    .selected_row()
+                    .and_then(|row| results.files.get(row))
+                    .filter(|_| self.job.is_none() && !self.root_path.trim().is_empty())
+                    .map(|entry| Message::InspectCatalogueFile(entry.path.clone()));
+                column![
+                    text("Search results").size(20),
+                    text("Choose a row to select it, then inspect the selected file when its source folder is available."),
+                    paginated_table(table, &self.search_table_state, Message::SearchTableAction),
+                    button("Inspect selected file").on_press_maybe(inspect_selected),
+                ]
+                .spacing(6)
+                .into()
             }
-            for entry in results.files.iter().skip(start).take(PAGE_SIZE) {
-                result_table = result_table.push(
-                    row![
-                        text(display_path(&entry.path))
-                            .width(Length::Fill)
-                            .wrapping(text::Wrapping::WordOrGlyph),
-                        text(format_bytes(entry.bytes.into())).width(Length::Fixed(120.0)),
-                        button("Inspect").on_press_maybe(
-                            (self.job.is_none() && !self.root_path.trim().is_empty())
-                                .then_some(Message::InspectCatalogueFile(entry.path.clone()))
-                        ),
-                    ]
-                    .spacing(12),
-                );
-            }
-            if results.files.len() > PAGE_SIZE {
-                result_table = result_table.push(
-                    row![
-                        button("Previous")
-                            .on_press_maybe((self.page_index > 0).then_some(Message::PreviousPage)),
-                        text(format!(
-                            "Showing {}–{} of {}",
-                            start + 1,
-                            end,
-                            results.files.len()
-                        )),
-                        button("Next").on_press_maybe(
-                            (end < results.files.len()).then_some(Message::NextPage)
-                        ),
-                    ]
-                    .spacing(12),
-                );
-            }
-        } else {
-            result_table =
-                result_table.push(text("Search a saved catalogue to browse matching paths."));
-        }
+            _ => column![
+                text("Search results").size(20),
+                text("Search a saved catalogue to browse matching paths.")
+            ]
+            .spacing(6)
+            .into(),
+        };
 
         let mut inspector = column![
             text("Selected file properties, metadata and integrity").size(20),
@@ -1061,6 +1316,66 @@ impl StudioUi {
         .spacing(6);
         if let Some(path) = &self.inspection_path {
             inspector = inspector.push(text(format!("Selected path: {}", display_path(path))));
+        }
+
+        let mut duplicate_view = column![
+            text("Duplicate candidates").size(20),
+            text("The selected source folder is scanned and files with matching BLAKE3 content hashes are grouped for review. Hashing is capped at 1 GiB of candidate data. This is read-only; no files are deleted or moved."),
+        ]
+        .spacing(6);
+        if let Some(report) = &self.duplicate_report {
+            if report.groups.is_empty() {
+                duplicate_view = duplicate_view.push(text(format!(
+                    "No matching content-hash groups among {} regular files.",
+                    report.regular_files_scanned
+                )));
+            }
+            let start = self.duplicate_page_index * DUPLICATE_PAGE_SIZE;
+            let end = (start + DUPLICATE_PAGE_SIZE).min(report.groups.len());
+            for group in report.groups.iter().skip(start).take(DUPLICATE_PAGE_SIZE) {
+                let mut group_view = column![text(format!(
+                    "{} files · {} each · BLAKE3 {}",
+                    group.paths.len(),
+                    format_bytes(group.bytes_per_file.into()),
+                    group.blake3
+                ))
+                .wrapping(text::Wrapping::WordOrGlyph)]
+                .spacing(4);
+                for path in group.paths.iter().take(8) {
+                    group_view = group_view
+                        .push(text(display_path(path)).wrapping(text::Wrapping::WordOrGlyph));
+                }
+                if group.paths.len() > 8 {
+                    group_view = group_view
+                        .push(text(format!("… and {} more paths", group.paths.len() - 8)));
+                }
+                duplicate_view =
+                    duplicate_view.push(container(group_view).padding(8).width(Length::Fill));
+            }
+            if report.groups.len() > DUPLICATE_PAGE_SIZE {
+                duplicate_view = duplicate_view.push(
+                    row![
+                        button("Previous groups").on_press_maybe(
+                            (self.duplicate_page_index > 0)
+                                .then_some(Message::PreviousDuplicatePage)
+                        ),
+                        text(format!(
+                            "Showing groups {}–{} of {}",
+                            start + 1,
+                            end,
+                            report.groups.len()
+                        )),
+                        button("Next groups").on_press_maybe(
+                            (end < report.groups.len()).then_some(Message::NextDuplicatePage)
+                        ),
+                    ]
+                    .spacing(8),
+                );
+            }
+        } else {
+            duplicate_view = duplicate_view.push(text(
+                "Choose a source folder and run the duplicate candidate scan to review matching hashes.",
+            ));
         }
         if let Some(bytes) = self.inspection_catalogued_bytes {
             inspector = inspector.push(text(format!(
@@ -1076,55 +1391,32 @@ impl StudioUi {
             );
         }
 
-        let mut history_table = column![
-            text("Scan history").size(20),
-            row![
-                text("Scan / source").width(Length::FillPortion(3)),
-                text("Files").width(Length::Fixed(80.0)),
-                text("Total size").width(Length::Fixed(120.0)),
-                text("Refresh delta").width(Length::Fixed(190.0)),
-                text("Timestamp (UTC ms)").width(Length::Fixed(180.0)),
+        let history_table: Element<'_, Message> = match &self.history_table {
+            Some(_) if self.history_table_rows.is_empty() => column![
+                text("Scan history").size(20),
+                text("No scan history is available in this catalogue.")
             ]
-            .spacing(8),
-        ]
-        .spacing(6);
-        if self.history.is_empty() {
-            history_table = history_table.push(text("No scan history loaded."));
-        }
-        for scan in &self.history {
-            let size = scan
-                .total_bytes
-                .parse::<u128>()
-                .map(format_bytes)
-                .unwrap_or_else(|_| "unknown".into());
-            history_table = history_table.push(
-                row![
-                    text(format!(
-                        "#{} · {}",
-                        scan.scan_id,
-                        display_path(&scan.root_label)
-                    ))
-                    .width(Length::FillPortion(3)),
-                    text(scan.files.to_string()).width(Length::Fixed(80.0)),
-                    text(size).width(Length::Fixed(120.0)),
-                    text(if scan.comparison_mode == "same-source" {
-                        format!("+{} ~{} −{}", scan.added, scan.changed, scan.removed)
-                    } else if scan.comparison_mode == "full-rescan" {
-                        "Full rescan; identity changed/unknown".to_owned()
-                    } else if scan.comparison_mode == "unknown" {
-                        "Legacy snapshot; identity unknown".to_owned()
-                    } else {
-                        "Baseline".to_owned()
-                    })
-                    .width(Length::Fixed(190.0)),
-                    text(scan.scanned_unix_ms.to_string()).width(Length::Fixed(180.0)),
+            .spacing(6)
+            .into(),
+            Some(table) => {
+                let mut history_view = column![
+                    text("Scan history").size(20),
+                    text("Select one row to fill the earlier scan ID and a second row to fill the later ID. Click a column heading to sort."),
+                    paginated_table(table, &self.history_table_state, Message::HistoryTableAction),
                 ]
-                .spacing(8),
-            );
-        }
-        if self.history_truncated {
-            history_table = history_table.push(text("Showing the latest 100 snapshots."));
-        }
+                .spacing(6);
+                if self.history_truncated {
+                    history_view = history_view.push(text("Showing the latest 100 snapshots."));
+                }
+                history_view.into()
+            }
+            None => column![
+                text("Scan history").size(20),
+                text("Load history from a saved SQLite catalogue.")
+            ]
+            .spacing(6)
+            .into(),
+        };
 
         let comparison = column![
             text("Compare saved snapshots").size(20),
@@ -1168,6 +1460,7 @@ impl StudioUi {
                 create_row,
                 result_table,
                 inspector,
+                duplicate_view,
                 history_table,
                 comparison,
             ]
@@ -1238,19 +1531,13 @@ impl StudioUi {
     }
 }
 
-impl StudioUi {
-    #[cfg(test)]
-    fn page_count_for_test(&self) -> usize {
-        self.page_count()
-    }
-}
-
 fn request_title(kind: RequestKind) -> &'static str {
     match kind {
         RequestKind::CreateCatalogue => "Catalogue creation",
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
+        RequestKind::Duplicates => "Duplicate candidate scan",
         RequestKind::CompareSnapshots => "Snapshot comparison",
         RequestKind::InspectSelection => "Selected file inspection",
         RequestKind::Operation => "Operation",
@@ -1298,7 +1585,7 @@ mod tests {
     fn workspace_starts_on_catalogue_and_pages_search_results() {
         let mut ui = StudioUi::new(OPERATIONS, no_op);
         assert_eq!(ui.page, Page::Catalogue);
-        ui.search_results = Some(SearchReport {
+        let report = SearchReport {
             schema_version: 1,
             catalogued_files: 205,
             matched_files: 205,
@@ -1308,13 +1595,67 @@ mod tests {
                     bytes: index,
                 })
                 .collect(),
-        });
-        assert_eq!(ui.page_count_for_test(), 3);
-        let _ = ui.update(Message::NextPage);
-        assert_eq!(ui.page_index, 1);
-        let _ = ui.update(Message::NextPage);
-        let _ = ui.update(Message::NextPage);
-        assert_eq!(ui.page_index, 2);
+        };
+        ui.search_table = Some(search_table_model(&report.files).unwrap());
+        ui.search_results = Some(report);
+        let result_count = ui.search_results.as_ref().unwrap().files.len();
+        assert_eq!(ui.search_table_state.page_count(result_count), 5);
+        let _ = ui.update(Message::SearchTableAction(TableAction::PageChanged(3)));
+        assert_eq!(ui.search_table_state.current_page(result_count), 3);
+        let _ = ui.update(Message::SearchTableAction(TableAction::PageChanged(
+            usize::MAX,
+        )));
+        assert_eq!(ui.search_table_state.current_page(result_count), 4);
+        let _ = ui.update(Message::SearchTableAction(TableAction::SortBy {
+            column: 1,
+            direction: SortDirection::Descending,
+        }));
+        assert_eq!(ui.search_results.as_ref().unwrap().files[0].bytes, 204);
+        let _ = ui.update(Message::SearchTableAction(TableAction::SelectRow(0)));
+        assert_eq!(ui.search_table_state.selected_row(), Some(0));
+        assert_eq!(
+            ui.search_results.as_ref().unwrap().files[0].path,
+            "file-204"
+        );
+    }
+
+    #[test]
+    fn history_table_sorting_and_row_selection_feed_snapshot_comparison() {
+        let mut ui = StudioUi::new(OPERATIONS, no_op);
+        ui.history_table_rows = vec![
+            ScanSummary {
+                scan_id: 1,
+                scanned_unix_ms: 100,
+                root_label: "Research".into(),
+                files: 4,
+                total_bytes: "200".into(),
+                comparison_mode: "baseline".into(),
+                added: 0,
+                changed: 0,
+                removed: 0,
+            },
+            ScanSummary {
+                scan_id: 2,
+                scanned_unix_ms: 200,
+                root_label: "Research".into(),
+                files: 5,
+                total_bytes: "100".into(),
+                comparison_mode: "same-source".into(),
+                added: 1,
+                changed: 0,
+                removed: 0,
+            },
+        ];
+        ui.history_table = Some(history_table_model(&ui.history_table_rows).unwrap());
+        let _ = ui.update(Message::HistoryTableAction(TableAction::SortBy {
+            column: 2,
+            direction: SortDirection::Ascending,
+        }));
+        assert_eq!(ui.history_table_rows[0].scan_id, 2);
+        let _ = ui.update(Message::HistoryTableAction(TableAction::SelectRow(0)));
+        assert_eq!(ui.compare_before, "2");
+        let _ = ui.update(Message::HistoryTableAction(TableAction::SelectRow(1)));
+        assert_eq!(ui.compare_after, "1");
     }
 
     #[test]
@@ -1326,6 +1667,11 @@ mod tests {
         let _ = ui.update(Message::Refresh);
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose an existing SQLite catalogue"));
+        let _ = ui.update(Message::FindDuplicates);
+        assert!(ui.job.is_none());
+        assert!(ui
+            .status
+            .contains("Choose the source folder before checking duplicate candidates"));
         let _ = ui.update(Message::InspectCatalogueFile("report.txt".into()));
         assert!(ui.job.is_none());
         assert!(ui.status.contains("Choose the source folder"));
@@ -1334,6 +1680,29 @@ mod tests {
         assert!(ui
             .status
             .contains("Choose the source folder before creating"));
+    }
+
+    #[test]
+    fn duplicate_candidate_groups_are_bounded_and_pageable() {
+        let mut ui = StudioUi::new(OPERATIONS, no_op);
+        ui.duplicate_report = Some(DuplicateReport {
+            schema_version: 1,
+            regular_files_scanned: 50,
+            groups: (0..25)
+                .map(|index| file_studio::catalogue_workspace::DuplicateGroup {
+                    bytes_per_file: index,
+                    blake3: "a".repeat(64),
+                    paths: vec![format!("file-{index}-a"), format!("file-{index}-b")],
+                })
+                .collect(),
+        });
+        assert_eq!(ui.duplicate_page_count(), 2);
+        let _ = ui.update(Message::NextDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 1);
+        let _ = ui.update(Message::NextDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 1);
+        let _ = ui.update(Message::PreviousDuplicatePage);
+        assert_eq!(ui.duplicate_page_index, 0);
     }
 
     #[cfg(unix)]
