@@ -6,6 +6,10 @@
 //! digest. A signature proves possession of a key; the fingerprint still needs
 //! to be compared with a separately trusted value.
 
+use age::{
+    secrecy::{ExposeSecret, SecretString},
+    Decryptor, Encryptor,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use localwright_core::{read_bounded, write_bytes, write_new, Error, Job, Result};
 use rand_core::OsRng;
@@ -14,13 +18,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::Read,
+    io::{Cursor, Read, Write},
     path::Path,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_KEY_BYTES: u64 = 16 * 1024;
 const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
+const MAX_PASSPHRASE_BYTES: usize = 4096;
 const MESSAGE_DOMAIN: &[u8] = b"File Studio detached signature v1\0";
 
 #[derive(Serialize, Deserialize)]
@@ -29,6 +35,28 @@ struct PrivateKeyFile {
     schema_version: u8,
     algorithm: String,
     private_seed_hex: String,
+}
+
+impl Drop for PrivateKeyFile {
+    fn drop(&mut self) {
+        self.private_seed_hex.zeroize();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectedPrivateKeyFile {
+    schema_version: u8,
+    algorithm: String,
+    protection: String,
+    public_key_hex: String,
+    fingerprint_sha256: String,
+    encrypted_seed_hex: String,
+}
+
+struct LoadedPrivateKey {
+    signing: SigningKey,
+    legacy_plaintext: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,18 +89,13 @@ struct VerifyOptions {
     trusted_public_key_path: Option<String>,
 }
 
-pub fn generate_key(output: &Path) -> Result<Value> {
+pub fn generate_key(output: &Path, passphrase: String) -> Result<Value> {
     ensure_private_output_parent(output)?;
     let signing = SigningKey::generate(&mut OsRng);
-    let mut seed = signing.to_bytes();
+    let seed = Zeroizing::new(signing.to_bytes());
     let public = signing.verifying_key().to_bytes();
     let fingerprint = fingerprint(&public);
-    let key_file = PrivateKeyFile {
-        schema_version: 1,
-        algorithm: "Ed25519".into(),
-        private_seed_hex: hex::encode(seed),
-    };
-    seed.fill(0);
+    let key_file = protect_seed(&seed, public, passphrase)?;
     let encoded = serde_json::to_vec_pretty(&key_file)?;
     write_bytes(output, &encoded)?;
     Ok(json!({
@@ -81,13 +104,36 @@ pub fn generate_key(output: &Path) -> Result<Value> {
         "private_key_file": output,
         "public_key_hex": hex::encode(public),
         "fingerprint_sha256": fingerprint,
-        "private_key_encrypted": false,
+        "private_key_encrypted": true,
+        "protection": "age scrypt passphrase encryption",
     }))
 }
 
-pub fn export_public(private_path: &Path, output: &Path) -> Result<Value> {
-    let signing = load_private(private_path)?;
-    let public = signing.verifying_key().to_bytes();
+pub fn protect_legacy_key(private_path: &Path, output: &Path, passphrase: String) -> Result<Value> {
+    ensure_private_output_parent(output)?;
+    let loaded = load_private(private_path, String::new())?;
+    if !loaded.legacy_plaintext {
+        return Err(Error::input(
+            "The selected private key is already protected; choose a legacy schema-v1 key to migrate",
+        ));
+    }
+    let seed = Zeroizing::new(loaded.signing.to_bytes());
+    let public = loaded.signing.verifying_key().to_bytes();
+    let envelope = protect_seed(&seed, public, passphrase)?;
+    write_bytes(output, &serde_json::to_vec_pretty(&envelope)?)?;
+    Ok(json!({
+        "schema_version": 2,
+        "algorithm": "Ed25519",
+        "protection": "age scrypt passphrase encryption",
+        "protected_key_file": output,
+        "fingerprint_sha256": envelope.fingerprint_sha256,
+        "legacy_source_preserved": true,
+    }))
+}
+
+pub fn export_public(private_path: &Path, output: &Path, passphrase: String) -> Result<Value> {
+    let loaded = load_private(private_path, passphrase)?;
+    let public = loaded.signing.verifying_key().to_bytes();
     let key = PublicKeyFile {
         schema_version: 1,
         algorithm: "Ed25519".into(),
@@ -100,15 +146,22 @@ pub fn export_public(private_path: &Path, output: &Path) -> Result<Value> {
         "algorithm": "Ed25519",
         "public_key_file": output,
         "fingerprint_sha256": key.fingerprint_sha256,
+        "legacy_plaintext_source": loaded.legacy_plaintext,
     }))
 }
 
-pub fn sign(input: &Path, output: &Path, key_path: &Path, job: &Job) -> Result<Value> {
-    let signing = load_private(key_path)?;
-    let public = signing.verifying_key().to_bytes();
+pub fn sign(
+    input: &Path,
+    output: &Path,
+    key_path: &Path,
+    passphrase: String,
+    job: &Job,
+) -> Result<Value> {
+    let loaded = load_private(key_path, passphrase)?;
+    let public = loaded.signing.verifying_key().to_bytes();
     let (digest, bytes) = digest_file(input, job)?;
     let message = signed_message(bytes, &digest);
-    let signature = signing.sign(&message);
+    let signature = loaded.signing.sign(&message);
     let envelope = SignatureFile {
         schema_version: 1,
         algorithm: "Ed25519".into(),
@@ -131,7 +184,104 @@ pub fn sign(input: &Path, output: &Path, key_path: &Path, job: &Job) -> Result<V
         "sha256": envelope.sha256,
         "signature_file": output,
         "signer_fingerprint_sha256": envelope.fingerprint_sha256,
+        "legacy_plaintext_key_used": loaded.legacy_plaintext,
     }))
+}
+
+fn validate_new_passphrase(passphrase: &str) -> Result<()> {
+    if passphrase.len() > MAX_PASSPHRASE_BYTES {
+        return Err(Error::input("Passphrase is too long (maximum 4 KiB)"));
+    }
+    if passphrase.chars().count() < 12 {
+        return Err(Error::input(
+            "Choose a passphrase of at least 12 characters for private-key protection",
+        ));
+    }
+    Ok(())
+}
+
+fn protect_seed(
+    seed: &[u8; 32],
+    public: [u8; 32],
+    passphrase: String,
+) -> Result<ProtectedPrivateKeyFile> {
+    let passphrase = SecretString::from(passphrase);
+    validate_new_passphrase(passphrase.expose_secret())?;
+    let encryptor = Encryptor::with_user_passphrase(passphrase);
+    let mut ciphertext = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut ciphertext)
+        .map_err(|_| Error::engine("Could not initialize private-key protection"))?;
+    writer
+        .write_all(seed)
+        .map_err(|_| Error::engine("Could not encrypt the private key"))?;
+    writer
+        .finish()
+        .map_err(|_| Error::engine("Could not finish private-key protection"))?;
+    Ok(ProtectedPrivateKeyFile {
+        schema_version: 2,
+        algorithm: "Ed25519".into(),
+        protection: "age-scrypt-v1".into(),
+        public_key_hex: hex::encode(public),
+        fingerprint_sha256: fingerprint(&public),
+        encrypted_seed_hex: hex::encode(ciphertext),
+    })
+}
+
+fn unlock_seed(
+    envelope: ProtectedPrivateKeyFile,
+    passphrase: SecretString,
+) -> Result<Zeroizing<[u8; 32]>> {
+    if passphrase.expose_secret().is_empty()
+        || passphrase.expose_secret().len() > MAX_PASSPHRASE_BYTES
+    {
+        return Err(Error::input(
+            "Enter the passphrase for this protected private key",
+        ));
+    }
+    let public = decode_exact::<32>(&envelope.public_key_hex, "public key")?;
+    if envelope.fingerprint_sha256 != fingerprint(&public) {
+        return Err(Error::input(
+            "Private-key public fingerprint does not match",
+        ));
+    }
+    let ciphertext = hex::decode(&envelope.encrypted_seed_hex)
+        .map_err(|_| Error::input("Protected private-key ciphertext is malformed"))?;
+    if ciphertext.len() > MAX_KEY_BYTES as usize {
+        return Err(Error::input(
+            "Protected private-key ciphertext is too large",
+        ));
+    }
+    let decryptor = Decryptor::new_buffered(Cursor::new(ciphertext))
+        .map_err(|_| Error::input("Protected private-key file is invalid"))?;
+    let mut identity = age::scrypt::Identity::new(passphrase);
+    // Bound the CPU and memory cost even when opening a hostile age header.
+    identity.set_max_work_factor(22);
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as _))
+        .map_err(|_| {
+            Error::input("Could not unlock private key; check the passphrase and file integrity")
+        })?;
+    let mut seed = Zeroizing::new([0u8; 32]);
+    reader.read_exact(&mut *seed).map_err(|_| {
+        Error::input("Could not unlock private key; check the passphrase and file integrity")
+    })?;
+    let mut trailing = [0u8; 1];
+    let trailing_bytes = reader.read(&mut trailing).map_err(|_| {
+        Error::input("Could not unlock private key; check the passphrase and file integrity")
+    })?;
+    if trailing_bytes != 0 {
+        return Err(Error::input(
+            "Protected private key has an invalid seed length",
+        ));
+    }
+    let derived_public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    if derived_public != public {
+        return Err(Error::input(
+            "Protected private-key seed does not match its public key",
+        ));
+    }
+    Ok(seed)
 }
 
 pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
@@ -274,7 +424,9 @@ fn decode_exact<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
         .map_err(|_| Error::input(format!("Invalid {label} length")))
 }
 
-fn load_private(path: &Path) -> Result<SigningKey> {
+fn load_private(path: &Path, passphrase: String) -> Result<LoadedPrivateKey> {
+    // Move user-entered secret text into age's zeroizing wrapper immediately.
+    let passphrase = SecretString::from(passphrase);
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(Error::input(
@@ -290,13 +442,40 @@ fn load_private(path: &Path) -> Result<SigningKey> {
             ));
         }
     }
-    let key: PrivateKeyFile = serde_json::from_slice(&read_bounded(path, MAX_KEY_BYTES)?)
+    let encoded = Zeroizing::new(read_bounded(path, MAX_KEY_BYTES)?);
+    let value: serde_json::Value = serde_json::from_slice(&encoded)
         .map_err(|_| Error::input("Private-key file is invalid"))?;
-    if key.schema_version != 1 || key.algorithm != "Ed25519" {
-        return Err(Error::input("Unsupported private-key format"));
+    let version = value["schema_version"].as_u64();
+    match version {
+        Some(1) => {
+            let mut key: PrivateKeyFile = serde_json::from_value(value)
+                .map_err(|_| Error::input("Legacy private-key file is invalid"))?;
+            if key.algorithm != "Ed25519" {
+                return Err(Error::input("Unsupported private-key algorithm"));
+            }
+            let seed_hex = Zeroizing::new(std::mem::take(&mut key.private_seed_hex));
+            let mut seed = Zeroizing::new(decode_exact::<32>(&seed_hex, "private key")?);
+            let signing = SigningKey::from_bytes(&seed);
+            seed.zeroize();
+            Ok(LoadedPrivateKey {
+                signing,
+                legacy_plaintext: true,
+            })
+        }
+        Some(2) => {
+            let envelope: ProtectedPrivateKeyFile = serde_json::from_value(value)
+                .map_err(|_| Error::input("Protected private-key file is invalid"))?;
+            if envelope.algorithm != "Ed25519" || envelope.protection != "age-scrypt-v1" {
+                return Err(Error::input("Unsupported private-key protection format"));
+            }
+            let seed = unlock_seed(envelope, passphrase)?;
+            Ok(LoadedPrivateKey {
+                signing: SigningKey::from_bytes(&seed),
+                legacy_plaintext: false,
+            })
+        }
+        _ => Err(Error::input("Unsupported private-key schema version")),
     }
-    let seed = decode_exact::<32>(&key.private_seed_hex, "private key")?;
-    Ok(SigningKey::from_bytes(&seed))
 }
 
 #[cfg(windows)]
@@ -335,14 +514,48 @@ mod tests {
         let public_path = directory.path().join("public.json");
         let signature_path = directory.path().join("file.sig.json");
         let input = directory.path().join("payload.bin");
+        let passphrase = "correct horse battery".to_owned();
         fs::write(&input, b"signed content\0\xff").unwrap();
-        generate_key(&key_path).unwrap();
-        export_public(&key_path, &public_path).unwrap();
-        sign(&input, &signature_path, &key_path, &Job::new()).unwrap();
+        let generated = generate_key(&key_path, passphrase.clone()).unwrap();
+        assert_eq!(generated["private_key_encrypted"], true);
+        assert_eq!(generated["protection"], "age scrypt passphrase encryption");
+        let key_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&key_path).unwrap()).unwrap();
+        assert_eq!(key_json["schema_version"], 2);
+        assert!(key_json.get("private_seed_hex").is_none());
+        assert!(key_json.get("encrypted_seed_hex").is_some());
+        assert!(!String::from_utf8_lossy(&fs::read(&key_path).unwrap()).contains(&passphrase));
+        assert!(generate_key(&directory.path().join("short.json"), "short".into()).is_err());
+        assert!(!directory.path().join("short.json").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        export_public(&key_path, &public_path, passphrase.clone()).unwrap();
+        sign(
+            &input,
+            &signature_path,
+            &key_path,
+            passphrase.clone(),
+            &Job::new(),
+        )
+        .unwrap();
         let options = serde_json::json!({"signature_path":signature_path,"trusted_public_key_path":public_path}).to_string();
         let verified = verify(&input, &options, &Job::new()).unwrap();
         assert_eq!(verified["verified"], true);
         assert_eq!(verified["trusted_key_matched"], true);
+        assert!(sign(
+            &input,
+            &directory.path().join("wrong.sig"),
+            &key_path,
+            "incorrect passphrase".into(),
+            &Job::new()
+        )
+        .is_err());
         fs::write(&input, b"tampered").unwrap();
         assert!(verify(&input, &options, &Job::new()).is_err());
     }
@@ -356,15 +569,102 @@ mod tests {
         let input = directory.path().join("payload.txt");
         let signature_path = directory.path().join("payload.sig.json");
         fs::write(&input, b"data").unwrap();
-        generate_key(&key_path).unwrap();
-        generate_key(&other_key_path).unwrap();
-        export_public(&key_path, &public_path).unwrap();
-        sign(&input, &signature_path, &key_path, &Job::new()).unwrap();
+        let passphrase = "correct horse battery".to_owned();
+        generate_key(&key_path, passphrase.clone()).unwrap();
+        generate_key(&other_key_path, passphrase.clone()).unwrap();
+        export_public(&key_path, &public_path, passphrase.clone()).unwrap();
+        sign(
+            &input,
+            &signature_path,
+            &key_path,
+            passphrase.clone(),
+            &Job::new(),
+        )
+        .unwrap();
         let original = fs::read(&signature_path).unwrap();
-        assert!(sign(&input, &signature_path, &key_path, &Job::new()).is_err());
+        assert!(sign(
+            &input,
+            &signature_path,
+            &key_path,
+            passphrase.clone(),
+            &Job::new()
+        )
+        .is_err());
         assert_eq!(fs::read(&signature_path).unwrap(), original);
-        export_public(&other_key_path, &directory.path().join("wrong.pub")).unwrap();
+        export_public(
+            &other_key_path,
+            &directory.path().join("wrong.pub"),
+            passphrase,
+        )
+        .unwrap();
         let wrong = serde_json::json!({"signature_path":signature_path,"trusted_public_key_path":directory.path().join("wrong.pub")}).to_string();
         assert!(verify(&input, &wrong, &Job::new()).is_err());
+    }
+
+    #[test]
+    fn legacy_plaintext_keys_remain_readable_and_migrate_without_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_path = directory.path().join("legacy.json");
+        let protected_path = directory.path().join("protected.json");
+        let public_path = directory.path().join("public.json");
+        let seed = [7u8; 32];
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "algorithm": "Ed25519",
+            "private_seed_hex": hex::encode(seed),
+        });
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&legacy_path, &legacy_bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let password = "migrate this signing key".to_owned();
+        let migration =
+            protect_legacy_key(&legacy_path, &protected_path, password.clone()).unwrap();
+        assert_eq!(migration["schema_version"], 2);
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+        assert!(protect_legacy_key(&legacy_path, &protected_path, password.clone()).is_err());
+        assert!(export_public(&protected_path, &public_path, password.clone()).is_ok());
+        let loaded = load_private(&legacy_path, String::new()).unwrap();
+        assert!(loaded.legacy_plaintext);
+        let protected = load_private(&protected_path, password).unwrap();
+        assert!(!protected.legacy_plaintext);
+        assert_eq!(
+            loaded.signing.verifying_key(),
+            protected.signing.verifying_key()
+        );
+    }
+
+    #[test]
+    fn protected_key_rejects_wrong_passphrase_tampering_and_broad_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("private.json");
+        let public_path = directory.path().join("public.json");
+        let password = "correct horse battery".to_owned();
+        generate_key(&key_path, password.clone()).unwrap();
+        assert!(export_public(&key_path, &public_path, "wrong password here".into()).is_err());
+
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&fs::read(&key_path).unwrap()).unwrap();
+        let mut ciphertext = encoded["encrypted_seed_hex"].as_str().unwrap().to_owned();
+        let first = ciphertext.as_bytes()[0];
+        ciphertext.replace_range(0..1, if first == b'0' { "1" } else { "0" });
+        encoded["encrypted_seed_hex"] = ciphertext.into();
+        let corrupted = directory.path().join("corrupted.json");
+        fs::write(&corrupted, serde_json::to_vec(&encoded).unwrap()).unwrap();
+        assert!(load_private(&corrupted, password.clone()).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(load_private(&key_path, password).is_err());
+            assert_eq!(
+                fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
     }
 }

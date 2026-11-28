@@ -12,6 +12,8 @@ age = { version = "=0.11.5", default-features = false }
 ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 hex = "=0.4.3"
+zeroize = "=1.9.2"
+rpassword = "=7.4.0"
 parmesan-par2 = "=0.6.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "fs", "io-util", "sync", "time"] }
 file-id = "=0.2.3"

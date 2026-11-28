@@ -342,37 +342,36 @@
       "operation": "signature-keygen",
       "description": "Generate a versioned Ed25519 key pair; the private key file is created with restrictive owner-only permissions but is not passphrase-encrypted",
       "status": "implemented-unverified",
-      "targets": [
-        "x86_64-unknown-linux-gnu"
-      ],
-      "fixture_status": "Linux x86_64 focused tests pass; hosted platform verification pending"
+      "targets": [],
+      "fixture_status": "Age-scrypt protected key workflows and compatibility tests implemented; targeted tests and hosted CI pending."
+    },
+    {
+      "operation": "signature-protect-key",
+      "description": "Migrate a legacy schema-v1 plaintext Ed25519 key to a new passphrase-protected age-scrypt schema-v2 file; source remains unchanged",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Legacy migration, source preservation, wrong passphrase and permissions tests added; targeted tests and hosted CI pending."
     },
     {
       "operation": "signature-export-public",
       "description": "Export a public Ed25519 key and SHA-256 fingerprint from a private key file",
       "status": "implemented-unverified",
-      "targets": [
-        "x86_64-unknown-linux-gnu"
-      ],
-      "fixture_status": "Linux x86_64 focused tests pass; hosted platform verification pending"
+      "targets": [],
+      "fixture_status": "Age-scrypt protected key workflows and compatibility tests implemented; targeted tests and hosted CI pending."
     },
     {
       "operation": "signature-create",
       "description": "Create a detached Ed25519 signature over a domain-separated file length and SHA-256 digest; stream files up to 4 GiB and refuse overwrite",
       "status": "implemented-unverified",
-      "targets": [
-        "x86_64-unknown-linux-gnu"
-      ],
-      "fixture_status": "Linux x86_64 round-trip and collision fixtures pass; hosted platform verification pending"
+      "targets": [],
+      "fixture_status": "Age-scrypt protected key workflows and compatibility tests implemented; targeted tests and hosted CI pending."
     },
     {
       "operation": "signature-verify",
       "description": "Verify a detached signature and optionally compare against a separately trusted public key; key possession does not establish real-world identity",
       "status": "implemented-unverified",
-      "targets": [
-        "x86_64-unknown-linux-gnu"
-      ],
-      "fixture_status": "Linux x86_64 trusted-key, wrong-key and tamper fixtures pass; hosted platform verification pending"
+      "targets": [],
+      "fixture_status": "Age-scrypt protected key workflows and compatibility tests implemented; targeted tests and hosted CI pending."
     },
     {
       "operation": "par2-create",
