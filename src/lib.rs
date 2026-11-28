@@ -6,6 +6,7 @@ mod encryption;
 mod exif_metadata;
 mod gzip_archive;
 mod jpeg_metadata;
+mod par2;
 mod png_metadata;
 mod signature;
 mod tar_archive;
@@ -54,6 +55,9 @@ pub const OPERATIONS: &[Operation] = &[
     Operation { id: "signature-export-public", label: "Export signing public key", hint: "Input an owner-only File Studio Ed25519 private-key JSON and choose a new .pub.json output. Compare the fingerprint through a trusted channel." },
     Operation { id: "signature-create", label: "Sign file", hint: "Create a detached Ed25519 signature for a regular file up to 4 GiB. Parameter is the owner-only private-key JSON path. Independently trust the signer fingerprint." },
     Operation { id: "signature-verify", label: "Verify file signature", hint: r#"Input the original file. Parameter JSON: {"signature_path":"file.sig.json","trusted_public_key_path":"trusted.pub.json"}. The trusted public key is optional; without it, verification does not establish signer identity."# },
+    Operation { id: "par2-create", label: "Create PAR2 recovery set", hint: "Input one regular file, choose an existing output directory, and optionally set recovery redundancy from 1–50% (default 10%). The Rust PAR2 engine creates interoperable recovery volumes; checksums provide corruption detection, not signer authenticity." },
+    Operation { id: "par2-verify", label: "Verify PAR2 recovery set", hint: "Input a .par2 index and enter the directory containing the original files in the output path. Verification is read-only. The underlying recovery engine is not interruptible during verification; cancellation is checked before and after." },
+    Operation { id: "par2-recover", label: "Recover files with PAR2", hint: "Input a .par2 index, enter the source directory as the parameter, and choose a new destination directory. Originals are read-only and never overwritten. The engine is not interruptible during repair; cancellation is checked before repair and during safe output publication." },
     Operation { id: "manifest-create", label: "Create checksum manifest", hint: "Create a versioned SHA-256 manifest for regular files below a directory. Choose a new .json output." },
     Operation { id: "manifest-verify", label: "Verify checksum manifest", hint: "Input a manifest JSON and enter its directory root as the parameter. Reports missing, changed and matching files without writing to them." },
     Operation { id: "backup-create", label: "Create versioned directory backup", hint: "Input a directory and choose a new .fsbackup archive. Includes regular files and empty directories; symlinks and special files are rejected. Per-file SHA-256 integrity manifest." },
@@ -1225,7 +1229,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     }
     if r.operation == "signature-create" {
         if r.parameter.trim().is_empty() {
-            return Err(Error::input("Enter the private-key JSON path as the parameter"));
+            return Err(Error::input(
+                "Enter the private-key JSON path as the parameter",
+            ));
         }
         let report = signature::sign(&r.input, &r.output, Path::new(r.parameter.trim()), &j)?;
         return Ok(Outcome {
@@ -1244,6 +1250,39 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             } else {
                 "Signature verification succeeded against the embedded public key, but signer identity is untrusted. Compare the reported fingerprint with a separately trusted value.".into()
             }],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "par2-create" {
+        let report = par2::create_for_file(&r.input, &r.output, &r.parameter, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["PAR2 recovery data can repair certain damaged or missing blocks, but it does not authenticate the source or recovery set. Keep an independent trusted checksum or signature for authenticity.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "par2-verify" {
+        let report = par2::verify_set(&r.input, &r.output, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            warnings: vec!["Verification reads the indexed source directory without writing files. The PAR2 library does not expose responsive cancellation during the verification phase.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "par2-recover" {
+        if r.parameter.trim().is_empty() {
+            return Err(Error::input(
+                "Enter the source directory path as the parameter",
+            ));
+        }
+        let report =
+            par2::recover_to_new_directory(&r.input, Path::new(r.parameter.trim()), &r.output, &j)?;
+        let created = report["destination_created"] == true;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: created.then_some(r.output),
+            warnings: vec!["PAR2 repair is limited by the recovery set and resource ceilings. The source tree remains unchanged; restored bytes must still be checked against an independent trusted source. The library does not expose responsive cancellation while repairing.".into()],
             ..Outcome::default()
         });
     }

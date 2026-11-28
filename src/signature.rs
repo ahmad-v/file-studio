@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, Metadata},
-    io::{Read, Write},
+    fs::{self, File},
+    io::Read,
     path::Path,
 };
 
@@ -136,10 +136,14 @@ pub fn sign(input: &Path, output: &Path, key_path: &Path, job: &Job) -> Result<V
 
 pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
     if options_json.len() > 16 * 1024 {
-        return Err(Error::input("Signature verification settings exceed 16 KiB"));
+        return Err(Error::input(
+            "Signature verification settings exceed 16 KiB",
+        ));
     }
     let options: VerifyOptions = serde_json::from_str(options_json).map_err(|_| {
-        Error::input("Parameter must be JSON with signature_path and optional trusted_public_key_path")
+        Error::input(
+            "Parameter must be JSON with signature_path and optional trusted_public_key_path",
+        )
     })?;
     if options.signature_path.is_empty() {
         return Err(Error::input("Choose a detached signature file"));
@@ -151,19 +155,24 @@ pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
         || envelope.algorithm != "Ed25519"
         || envelope.message_format != "file-studio-sha256-v1"
     {
-        return Err(Error::input("Unsupported detached signature version or algorithm"));
+        return Err(Error::input(
+            "Unsupported detached signature version or algorithm",
+        ));
     }
     let public_bytes = decode_exact::<32>(&envelope.public_key_hex, "public key")?;
     let public = VerifyingKey::from_bytes(&public_bytes)
         .map_err(|_| Error::input("Signature contains an invalid Ed25519 public key"))?;
     let actual_fingerprint = fingerprint(&public_bytes);
     if envelope.fingerprint_sha256 != actual_fingerprint {
-        return Err(Error::input("Signature public-key fingerprint does not match"));
+        return Err(Error::input(
+            "Signature public-key fingerprint does not match",
+        ));
     }
 
     if let Some(path) = options.trusted_public_key_path.as_deref() {
-        let trusted: PublicKeyFile = serde_json::from_slice(&read_bounded(Path::new(path), MAX_KEY_BYTES)?)
-            .map_err(|_| Error::input("Trusted public-key file is invalid"))?;
+        let trusted: PublicKeyFile =
+            serde_json::from_slice(&read_bounded(Path::new(path), MAX_KEY_BYTES)?)
+                .map_err(|_| Error::input("Trusted public-key file is invalid"))?;
         if trusted.schema_version != 1 || trusted.algorithm != "Ed25519" {
             return Err(Error::input("Unsupported trusted public-key format"));
         }
@@ -171,7 +180,9 @@ pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
         if trusted.fingerprint_sha256 != fingerprint(&trusted_bytes)
             || trusted_bytes != public_bytes
         {
-            return Err(Error::input("Signature key does not match the selected trusted public key"));
+            return Err(Error::input(
+                "Signature key does not match the selected trusted public key",
+            ));
         }
     }
 
@@ -179,7 +190,9 @@ pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
     let signature = Signature::from_bytes(&signature_bytes);
     let (digest, bytes) = digest_file(input, job)?;
     if bytes != envelope.file_bytes || hex::encode(digest) != envelope.sha256 {
-        return Err(Error::input("Signed file size or SHA-256 digest does not match"));
+        return Err(Error::input(
+            "Signed file size or SHA-256 digest does not match",
+        ));
     }
     public
         .verify(&signed_message(bytes, &digest), &signature)
@@ -198,11 +211,16 @@ pub fn verify(input: &Path, options_json: &str, job: &Job) -> Result<Value> {
 fn digest_file(path: &Path, job: &Job) -> Result<([u8; 32], u64)> {
     let before = fs::symlink_metadata(path)?;
     if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_FILE_BYTES {
-        return Err(Error::input("Choose a regular, non-symlink file up to 4 GiB"));
+        return Err(Error::input(
+            "Choose a regular, non-symlink file up to 4 GiB",
+        ));
     }
     let mut file = File::open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() != before.len() || opened.modified()? != before.modified()? {
+    if !opened.is_file()
+        || opened.len() != before.len()
+        || opened.modified()? != before.modified()?
+    {
         return Err(Error::input("File changed while it was being opened"));
     }
     let mut hasher = Sha256::new();
@@ -211,8 +229,12 @@ fn digest_file(path: &Path, job: &Job) -> Result<([u8; 32], u64)> {
     loop {
         job.check()?;
         let count = file.read(&mut buffer)?;
-        if count == 0 { break; }
-        total = total.checked_add(count as u64).ok_or_else(|| Error::input("File size overflow"))?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| Error::input("File size overflow"))?;
         if total > before.len() || total > MAX_FILE_BYTES {
             return Err(Error::input("File grew while being processed"));
         }
@@ -245,20 +267,27 @@ fn fingerprint(public: &[u8; 32]) -> String {
 }
 
 fn decode_exact<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
-    let bytes = hex::decode(value).map_err(|_| Error::input(format!("Invalid {label} encoding")))?;
-    bytes.try_into().map_err(|_| Error::input(format!("Invalid {label} length")))
+    let bytes =
+        hex::decode(value).map_err(|_| Error::input(format!("Invalid {label} encoding")))?;
+    bytes
+        .try_into()
+        .map_err(|_| Error::input(format!("Invalid {label} length")))
 }
 
 fn load_private(path: &Path) -> Result<SigningKey> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(Error::input("Private key must be a regular, non-symlink file"));
+        return Err(Error::input(
+            "Private key must be a regular, non-symlink file",
+        ));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(Error::input("Private key permissions are too broad; restrict access to its owner"));
+            return Err(Error::input(
+                "Private key permissions are too broad; restrict access to its owner",
+            ));
         }
     }
     let key: PrivateKeyFile = serde_json::from_slice(&read_bounded(path, MAX_KEY_BYTES)?)
@@ -272,19 +301,27 @@ fn load_private(path: &Path) -> Result<SigningKey> {
 
 #[cfg(windows)]
 fn ensure_private_output_parent(path: &Path) -> Result<()> {
-    let profile = std::env::var_os("USERPROFILE")
-        .ok_or_else(|| Error::input("Cannot locate the Windows user profile for private key output"))?;
+    let profile = std::env::var_os("USERPROFILE").ok_or_else(|| {
+        Error::input("Cannot locate the Windows user profile for private key output")
+    })?;
     let profile = fs::canonicalize(profile)?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let parent = fs::canonicalize(parent)?;
     if !parent.starts_with(profile) {
-        return Err(Error::input("Save private key files inside your Windows user profile"));
+        return Err(Error::input(
+            "Save private key files inside your Windows user profile",
+        ));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn ensure_private_output_parent(_path: &Path) -> Result<()> { Ok(()) }
+fn ensure_private_output_parent(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

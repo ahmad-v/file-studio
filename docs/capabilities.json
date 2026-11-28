@@ -337,6 +337,69 @@
         "x86_64-unknown-linux-gnu"
       ],
       "fixture_status": "Linux round-trip, wrong-key, tampering and no-plaintext-publication fixtures passed"
+    },
+    {
+      "operation": "signature-keygen",
+      "description": "Generate a versioned Ed25519 key pair; the private key file is created with restrictive owner-only permissions but is not passphrase-encrypted",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 focused tests pass; hosted platform verification pending"
+    },
+    {
+      "operation": "signature-export-public",
+      "description": "Export a public Ed25519 key and SHA-256 fingerprint from a private key file",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 focused tests pass; hosted platform verification pending"
+    },
+    {
+      "operation": "signature-create",
+      "description": "Create a detached Ed25519 signature over a domain-separated file length and SHA-256 digest; stream files up to 4 GiB and refuse overwrite",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 round-trip and collision fixtures pass; hosted platform verification pending"
+    },
+    {
+      "operation": "signature-verify",
+      "description": "Verify a detached signature and optionally compare against a separately trusted public key; key possession does not establish real-world identity",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 trusted-key, wrong-key and tamper fixtures pass; hosted platform verification pending"
+    },
+    {
+      "operation": "par2-create",
+      "description": "Create a bounded single-file PAR2 recovery set with the MIT-licensed parmesan-par2 engine",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 test passes; one-file creation only; hosted platform verification pending"
+    },
+    {
+      "operation": "par2-verify",
+      "description": "Read-only verification of a PAR2 set against a source directory",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 test passes; verification cannot be cancelled during the engine phase; hosted platform verification pending"
+    },
+    {
+      "operation": "par2-recover",
+      "description": "Verify and repair damaged or missing files into a new no-overwrite destination",
+      "status": "implemented-unverified",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux x86_64 damaged-copy recovery fixture passes; engine repair phase is not interruptible; hosted platform verification pending"
     }
   ]
 }

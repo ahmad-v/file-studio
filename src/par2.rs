@@ -7,9 +7,7 @@
 
 use localwright_core::{Error, ErrorKind, Job, Result};
 use parmesan::{
-    create::{
-        self, CreateCancellation, CreateEvent, CreateRequest, OutputPolicy, Recovery,
-    },
+    create::{self, CreateCancellation, CreateEvent, CreateRequest, OutputPolicy, Recovery},
     recovery_set::RecoverySet,
     repair::{self, RepairOptions},
     verify::{self, FileStatus},
@@ -53,7 +51,9 @@ pub fn create_for_file(
     let output_metadata = fs::symlink_metadata(output_dir)
         .map_err(|error| Error::input(format!("Choose an existing output directory: {error}")))?;
     if !output_metadata.is_dir() || output_metadata.file_type().is_symlink() {
-        return Err(Error::input("Choose an existing, non-symlink output directory"));
+        return Err(Error::input(
+            "Choose an existing, non-symlink output directory",
+        ));
     }
 
     let request = CreateRequest::from_paths([input])
@@ -83,19 +83,13 @@ pub fn create_for_file(
         }
     });
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| Error::engine(format!("Could not initialize PAR2 runtime: {error}")))?;
     let result = runtime.block_on(create::create_with_progress_and_cancellation(
         request,
         &cancellation,
         |event| match event {
-            CreateEvent::Planned {
-                input_bytes,
-                ..
-            } => job.progress(0, input_bytes.saturating_mul(2)),
+            CreateEvent::Planned { input_bytes, .. } => {
+                job.progress(0, input_bytes.saturating_mul(2))
+            }
             CreateEvent::BytesRead { bytes_read, .. } => {
                 job.progress(bytes_read, 0);
             }
@@ -202,7 +196,8 @@ pub fn recover_to_new_directory(
     if !report.is_repairable() {
         return Err(Error::input(format!(
             "Recovery needs {} blocks, but only {} are available",
-            report.total_bad_slices(), report.available_recovery_blocks
+            report.total_bad_slices(),
+            report.available_recovery_blocks
         )));
     }
 
@@ -301,7 +296,9 @@ fn validate_directory(path: &Path, message: &str) -> Result<()> {
 fn validate_index_and_set_size(index_path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(index_path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(Error::input("Choose a regular, non-symlink .par2 index file"));
+        return Err(Error::input(
+            "Choose a regular, non-symlink .par2 index file",
+        ));
     }
     if !index_path
         .extension()
@@ -316,7 +313,11 @@ fn validate_index_and_set_size(index_path: &Path) -> Result<()> {
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("par2")) {
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("par2"))
+        {
             let metadata = fs::symlink_metadata(&path)?;
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(Error::input(
@@ -343,7 +344,9 @@ fn validate_new_destination(path: &Path) -> Result<()> {
         return Err(Error::input("Choose a new recovery directory"));
     }
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(Error::input("Recovery destination already exists; choose a new directory")),
+        Ok(_) => Err(Error::input(
+            "Recovery destination already exists; choose a new directory",
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
@@ -353,9 +356,9 @@ fn safe_recovery_path(root: &Path, name: &str) -> Result<PathBuf> {
     let relative = Path::new(name);
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
-        || relative.components().any(|component| {
-            !matches!(component, std::path::Component::Normal(_))
-        })
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err(Error::input("PAR2 set contains an unsafe output path"));
     }
@@ -404,7 +407,9 @@ fn validate_source_members(set: &RecoverySet, source_dir: &Path) -> Result<()> {
 fn copy_new_file(source: &Path, target: &Path, job: &Job) -> Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(Error::input("PAR2 engine produced a non-regular staged file"));
+        return Err(Error::input(
+            "PAR2 engine produced a non-regular staged file",
+        ));
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
@@ -464,7 +469,10 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::OpenOptions, io::{Seek, SeekFrom}};
+    use std::{
+        fs::OpenOptions,
+        io::{Seek, SeekFrom},
+    };
 
     #[test]
     fn recovery_percentage_is_bounded() {
@@ -481,7 +489,10 @@ mod tests {
         for name in ["../escape", "a/../../escape", "/absolute", "", "."] {
             assert!(safe_recovery_path(root, name).is_err(), "{name}");
         }
-        assert_eq!(safe_recovery_path(root, "nested/file.bin").unwrap(), root.join("nested/file.bin"));
+        assert_eq!(
+            safe_recovery_path(root, "nested/file.bin").unwrap(),
+            root.join("nested/file.bin")
+        );
     }
 
     #[test]
@@ -512,7 +523,11 @@ mod tests {
         let created = create_for_file(&source, &set_dir, "30", &Job::new()).unwrap();
         let index = PathBuf::from(created["index"].as_str().unwrap());
         assert!(index.is_file());
-        assert!(verify_set(&index, &source_dir, &Job::new()).unwrap()["valid"].as_bool().unwrap());
+        assert!(
+            verify_set(&index, &source_dir, &Job::new()).unwrap()["valid"]
+                .as_bool()
+                .unwrap()
+        );
 
         let mut damaged = OpenOptions::new().write(true).open(&source).unwrap();
         damaged.seek(SeekFrom::Start(32 * 1024)).unwrap();
@@ -523,22 +538,11 @@ mod tests {
         assert!(verification["repairable"].as_bool().unwrap());
 
         let destination = root.path().join("restored");
-        let recovered = recover_to_new_directory(
-            &index,
-            &source_dir,
-            &destination,
-            &Job::new(),
-        )
-        .unwrap();
+        let recovered =
+            recover_to_new_directory(&index, &source_dir, &destination, &Job::new()).unwrap();
         assert_eq!(recovered["status"], "recovered");
         assert_eq!(fs::read(destination.join("sample.bin")).unwrap(), original);
         assert_ne!(fs::read(&source).unwrap(), original);
-        assert!(recover_to_new_directory(
-            &index,
-            &source_dir,
-            &destination,
-            &Job::new()
-        )
-        .is_err());
+        assert!(recover_to_new_directory(&index, &source_dir, &destination, &Job::new()).is_err());
     }
 }
