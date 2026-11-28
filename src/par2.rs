@@ -16,7 +16,7 @@ use parmesan::{
 };
 use serde_json::{json, Value};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -410,7 +410,10 @@ fn copy_new_file(source: &Path, target: &Path, job: &Job) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let mut input = File::open(source)?;
-    let mut output = OpenOptions::new().write(true).create_new(true).open(target)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::input("Recovery output has no parent directory"))?;
+    let mut output = tempfile::NamedTempFile::new_in(parent)?;
     let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
     loop {
         job.check()?;
@@ -420,7 +423,10 @@ fn copy_new_file(source: &Path, target: &Path, job: &Job) -> Result<()> {
         }
         output.write_all(&buffer[..read])?;
     }
-    output.sync_all()?;
+    output.as_file().sync_all()?;
+    output
+        .persist_noclobber(target)
+        .map_err(|error| Error::from(error.error))?;
     Ok(())
 }
 
@@ -458,7 +464,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Seek, SeekFrom};
+    use std::{fs::OpenOptions, io::{Seek, SeekFrom}};
 
     #[test]
     fn recovery_percentage_is_bounded() {
