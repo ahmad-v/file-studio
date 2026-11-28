@@ -1,10 +1,10 @@
 use exif::Reader;
-use localwright_core::{Error, Job, Result};
+use localwright_core::{read_bounded, Error, Job, Result};
 use serde_json::{json, Value};
 use std::{
     fmt::{self, Write as FmtWrite},
     fs,
-    io::BufReader,
+    io::{BufReader, Cursor},
     path::Path,
 };
 
@@ -24,16 +24,17 @@ pub fn inspect(path: &Path, job: &Job) -> Result<Value> {
         ));
     }
     job.check()?;
-    let file = fs::File::open(path)?;
-    let opened = file.metadata()?;
-    if !opened.is_file()
-        || opened.len() != before.len()
-        || opened.modified()? != before.modified()?
+    let bytes = read_bounded(path, MAX_BYTES)?;
+    let after_read = fs::symlink_metadata(path)?;
+    if !after_read.is_file()
+        || after_read.file_type().is_symlink()
+        || after_read.len() != before.len()
+        || after_read.modified()? != before.modified()?
     {
-        return Err(Error::input("Image changed before EXIF inspection"));
+        return Err(Error::input("Image changed during EXIF inspection"));
     }
     let exif = Reader::new()
-        .read_from_container(&mut BufReader::new(file))
+        .read_from_container(&mut BufReader::new(Cursor::new(bytes)))
         .map_err(|error| Error::input(format!("EXIF inspection failed: {error}")))?;
     job.check()?;
     let total = exif.fields().len();
