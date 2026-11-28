@@ -12,4 +12,6 @@ A preliminary RustSec review used advisory database revision `c9f6c91a44dbad9d71
 
 The persistent catalogue uses `rusqlite 0.43.0` with its bundled SQLite source (`libsqlite3-sys 0.40.0`) and `tempfile 3.19.1` for private staging before no-clobber publication. Rusqlite is MIT; SQLite's upstream project is public domain. Bundling avoids an external SQLite installation and fixes the supported Rust minimum at 1.89. Catalogue databases are capped at 64 MiB, opened read-only for search/history, and versioned with application and schema IDs. Final license/native asset review remains open.
 
+Single-file GZIP operations use the existing locked `flate2 1.1.11` dependency with the Rust-native `zlib-rs` backend; this adds no new package versions to the lockfile. The implementation streams through bounded buffers and leaves directory archive handling to the ZIP workflow until TAR support is implemented and verified.
+
 On 2026-11-27, `cargo +1.89.0 audit --file Cargo.lock` found no vulnerability advisories. It reported eight unmaintained crates with no fixed versions: `basic-toml 0.1.10`, `instant 0.1.13`, `pin-utils 0.1.1`, `proc-macro-error2 2.0.1`, `rustybuzz 0.14.1`, and `ttf-parser` 0.20.0, 0.21.1 and 0.25.1. These remain dependency-monitoring items; the current advisory output contained no security vulnerability finding.

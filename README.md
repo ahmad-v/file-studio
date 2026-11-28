@@ -7,7 +7,7 @@ This independent studio uses Localwright at source level. There is no separate m
 ## What is in this snapshot
 
 - File inspection, metadata and timestamps, bounded hexadecimal preview, SHA-256/SHA-512/BLAKE3 verification, and PNG metadata operations.
-- Directory inventories and saved-catalogue search, duplicate candidates, usage reports, versioned SHA-256 manifests, safe ZIP routes, and age file encryption.
+- Directory inventories and saved-catalogue search, duplicate candidates, usage reports, versioned SHA-256 manifests, bounded ZIP and single-file GZIP routes, and age file encryption.
 - SQLite catalogues retain scan history and support disconnected snapshot search. Unix refreshes compare only when filesystem-device/root-inode identity matches; Windows uses volume serial plus root-directory file index. Targets without stable identity use full-rescan baselines. Refreshes still traverse the complete directory. If permissions, traversal errors, non-Unicode paths, or safety limits prevent a complete scan, the app reports a partial JSON inventory and does not append a catalogue snapshot or infer removals; incomplete inventory reports cannot be loaded as catalogues.
 - The native Catalogue workspace opens a saved SQLite catalogue, searches and paginates paths, inspects a selected file's properties and hashes when the source folder is available, reviews recent scans, compares any two retained snapshots offline, appends a fresh snapshot, and runs a read-only BLAKE3 duplicate-candidate review on the selected source folder. Candidate groups are paginated and no file is removed automatically. General processing routes remain available in the Operations page.
 

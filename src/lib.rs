@@ -2,6 +2,7 @@
 mod catalog;
 pub mod catalogue_workspace;
 mod encryption;
+mod gzip_archive;
 mod png_metadata;
 use localwright_core::*;
 use serde::Deserialize;
@@ -65,6 +66,9 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation { id: "zip-create-directory", label: "Create ZIP from directory", hint: "Compress regular files in a directory recursively into a new .zip archive. Symbolic links are skipped; empty directories and filesystem metadata are not stored." },
     Operation { id: "zip-extract-all", label: "Extract ZIP archive", hint: "Extract regular files and directories to a new destination folder. Traversal, links, collisions, and archives beyond the documented expansion limits are rejected." },
+    Operation { id: "gzip-create", label: "Create GZIP file", hint: "Compress one regular file to a new .gz file using the Rust-native GZIP encoder. Source and compressed output limits: 1 GiB each. Original file is unchanged." },
+    Operation { id: "gzip-extract", label: "Extract GZIP file", hint: "Decompress one GZIP stream, including concatenated members, to a new selected file. Compressed input and expanded output are each limited to 1 GiB. CRC and size are checked; original archive is unchanged." },
+    Operation { id: "gzip-test", label: "Test GZIP integrity", hint: "Stream-decompress one GZIP file to a sink to validate CRC and size without writing extracted data. Compressed input and expanded data are each limited to 1 GiB." },
     Operation {
         id: "duplicates",
         label: "Find duplicate candidates",
@@ -108,6 +112,8 @@ fn identify(b: &[u8]) -> &'static str {
         "image/jpeg"
     } else if b.starts_with(b"PK\x03\x04") || b.starts_with(b"PK\x05\x06") {
         "application/zip"
+    } else if b.starts_with(b"\x1f\x8b") {
+        "application/gzip"
     } else if b.starts_with(b"\x7fELF") {
         "application/x-elf"
     } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WAVE") {
@@ -1148,6 +1154,23 @@ fn safe_cell(s: &str) -> String {
 }
 pub fn handle(r: Request, j: Job) -> Result<Outcome> {
     j.check()?;
+    if matches!(r.operation.as_str(), "gzip-create" | "gzip-extract") {
+        let report = if r.operation == "gzip-create" {
+            gzip_archive::create(&r.input, &r.output, &j)?
+        } else {
+            gzip_archive::extract(&r.input, &r.output, &j)?
+        };
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec![if r.operation == "gzip-create" {
+                "GZIP stores compressed bytes and CRC integrity information. It does not authenticate who created the file or preserve source filesystem metadata.".into()
+            } else {
+                "Decompressed untrusted bytes to a new file. CRC validation is not a malware scan or authenticity check; review content before opening it.".into()
+            }],
+            ..Outcome::default()
+        });
+    }
     if r.operation == "age-keygen" {
         let report = encryption::generate_key(&r.output)?;
         return Ok(Outcome {
@@ -1279,6 +1302,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }
         "zip-list" => list_zip(&r.input, &j)?,
         "zip-test" => test_zip(&r.input, &j)?,
+        "gzip-test" => gzip_archive::test(&r.input, &j)?,
         "file-times" => file_times(&r.input)?,
         "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
         "catalog-search" => catalog::search(&r.input, &r.parameter, &j)?,
@@ -1408,6 +1432,8 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             "Entry data integrity only. The report does not establish authenticity or extraction safety.".into()
         } else if r.operation == "zip-list" {
             "ZIP metadata only. Reported sizes are declarations and entry contents were not tested or extracted.".into()
+        } else if r.operation == "gzip-test" {
+            "GZIP CRC and uncompressed size are verified while streaming to a sink. This does not establish file authenticity.".into()
         } else {
             "Signature detection is limited; scan paths may contain sensitive information.".into()
         }],
@@ -2122,6 +2148,7 @@ mod tests {
     #[test]
     fn signatures() {
         assert_eq!(identify(b"%PDF-1.7"), "application/pdf");
+        assert_eq!(identify(b"\x1f\x8b\x08"), "application/gzip");
         assert_eq!(identify(b"abc"), "unknown");
     }
 
