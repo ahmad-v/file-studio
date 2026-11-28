@@ -132,7 +132,7 @@ mod tests {
         let report = inspect(&path, &Job::new()).unwrap();
         assert_eq!(report["field_count"], 1);
         assert_eq!(report["fields"][0]["tag"], "Make");
-        assert_eq!(report["fields"][0]["value"], "ABC");
+        assert_eq!(report["fields"][0]["value"], "\"ABC\"");
     }
 
     #[test]
