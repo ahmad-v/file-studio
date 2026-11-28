@@ -3,6 +3,7 @@ mod catalog;
 pub mod catalogue_workspace;
 mod encryption;
 mod gzip_archive;
+mod jpeg_metadata;
 mod png_metadata;
 mod tar_archive;
 use localwright_core::*;
@@ -30,6 +31,8 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Remove PNG text and EXIF",
         hint: "Remove PNG text and EXIF chunks from a copy. Choose a new .png output.",
     },
+    Operation { id: "jpeg-metadata", label: "Inspect JPEG metadata segments", hint: "Identify JPEG EXIF, XMP and Photoshop/IPTC metadata segments without decoding image pixels. Optional JSON output." },
+    Operation { id: "jpeg-strip-metadata", label: "Remove supported JPEG metadata", hint: "Copy a JPEG without recognized EXIF, XMP and Photoshop/IPTC APP segments. Choose a new .jpg or .jpeg output; other segments and scan data are preserved." },
     Operation {
         id: "hex-preview",
         label: "Hex preview",
@@ -278,6 +281,11 @@ fn inspect_report(path: &Path, job: &Job) -> Result<Value> {
             ))
         };
         report["format_properties"] = match metadata {
+            Ok(properties) => properties,
+            Err(error) => json!({"inspection_error": error.message}),
+        };
+    } else if report["signature"] == "image/jpeg" {
+        report["format_properties"] = match jpeg_metadata::process(path, None, job) {
             Ok(properties) => properties,
             Err(error) => json!({"inspection_error": error.message}),
         };
@@ -1221,6 +1229,16 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 ..Outcome::default()
             });
         }
+        "jpeg-metadata" => jpeg_metadata::process(&r.input, None, &j)?,
+        "jpeg-strip-metadata" => {
+            let report = jpeg_metadata::process(&r.input, Some(&r.output), &j)?;
+            return Ok(Outcome {
+                preview: serde_json::to_string_pretty(&report)?,
+                written: Some(r.output),
+                warnings: vec!["Removed only recognized EXIF APP1, standard XMP APP1 and Photoshop APP13 segments before the first scan. ICC profiles, unknown segments, later metadata, embedded thumbnails outside those blocks, comments and image content may remain. This is selective cleanup, not complete sanitation, redaction or anonymity.".into()],
+                ..Outcome::default()
+            });
+        }
         "hex-preview" => hex_preview(&r.input, &r.parameter, &j)?,
         "verify" => verify(&r.input, &r.parameter, &j)?,
         "manifest-create" => {
@@ -1457,6 +1475,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             "Comparison uses saved relative paths and file sizes only. Source identity is reported; same-size content changes cannot be detected. The original volume is not accessed.".into()
         } else if r.operation == "png-metadata" {
             "Reports PNG chunk types and counts without decoding image pixels or metadata values."
+                .into()
+        } else if r.operation == "jpeg-metadata" {
+            "Reports recognized metadata-bearing JPEG APP segment counts; tag values are not decoded."
                 .into()
         } else if r.operation == "hex-preview" {
             "The report contains raw file bytes. Review it before sharing.".into()

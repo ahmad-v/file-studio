@@ -95,6 +95,20 @@
       "fixture_status": "Linux fixture and independent PNG pixel and metadata checks passed"
     },
     {
+      "operation": "jpeg-metadata",
+      "description": "Bounded recognition/counting of standard EXIF APP1, Adobe XMP APP1 and Photoshop APP13 segments in JPEG headers",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Unit fixtures added; hosted Check pending"
+    },
+    {
+      "operation": "jpeg-strip-metadata",
+      "description": "Copy-on-write selective removal of recognized EXIF/XMP/Photoshop metadata segments while retaining ICC profiles and scan bytes",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Unit fixtures added; hosted Check pending"
+    },
+    {
       "operation": "hex-preview",
       "description": "Bounded file window with hex and printable ASCII",
       "status": "implemented-unverified",
