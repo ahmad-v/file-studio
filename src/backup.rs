@@ -473,7 +473,7 @@ fn plan_archive<R: Read + std::io::Seek>(
     let mut expanded = 0u64;
     for index in 0..archive.len() {
         job.check()?;
-        let mut member = archive
+        let member = archive
             .by_index(index)
             .map_err(|error| Error::input(format!("Invalid backup entry: {error}")))?;
         let name = member
@@ -598,7 +598,8 @@ fn plan_archive<R: Read + std::io::Seek>(
             .map_err(|error| Error::input(format!("Invalid backup entry: {error}")))?;
         let name = member
             .name()
-            .map_err(|error| Error::input(format!("Invalid backup entry name: {error}")))?;
+            .map_err(|error| Error::input(format!("Invalid backup entry name: {error}")))?
+            .into_owned();
         if name == MANIFEST_NAME {
             continue;
         }
