@@ -24,6 +24,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use zeroize::Zeroize;
 
 const SCALES: [u16; 7] = [80, 100, 125, 150, 200, 250, 300];
 const DUPLICATE_PAGE_SIZE: usize = 20;
@@ -296,6 +297,8 @@ struct StudioUi {
     input_selection: Option<PathBuf>,
     output_path: String,
     output_selection: Option<PathBuf>,
+    signing_key_path: String,
+    signing_key_selection: Option<PathBuf>,
     parameter: String,
     operation_preview: String,
     status: String,
@@ -336,9 +339,12 @@ enum Message {
     Input(String),
     Output(String),
     Parameter(String),
+    SigningKeyPath(String),
     BrowseInputFile,
     BrowseInputFolder,
     InputPicked(Option<PathBuf>),
+    BrowseSigningKey,
+    SigningKeyPicked(Option<PathBuf>),
     BrowseOutput,
     OutputPicked(Option<PathBuf>),
     RunOperation,
@@ -403,6 +409,8 @@ impl StudioUi {
             input_selection: None,
             output_path: String::new(),
             output_selection: None,
+            signing_key_path: String::new(),
+            signing_key_selection: None,
             parameter: String::new(),
             operation_preview: String::new(),
             status: "Open a saved catalogue or create one from the Operations page.".into(),
@@ -602,7 +610,10 @@ impl StudioUi {
                     self.duplicate_page_index += 1;
                 }
             }
-            Message::Operation(operation) => self.selected_operation = operation,
+            Message::Operation(operation) => {
+                self.parameter.zeroize();
+                self.selected_operation = operation;
+            }
             Message::Input(input) => {
                 self.input_path = input;
                 self.input_selection = None;
@@ -611,7 +622,15 @@ impl StudioUi {
                 self.output_path = output;
                 self.output_selection = None;
             }
-            Message::Parameter(parameter) => self.parameter = parameter,
+            Message::Parameter(mut parameter) => {
+                self.parameter.zeroize();
+                self.parameter = std::mem::take(&mut parameter);
+                parameter.zeroize();
+            }
+            Message::SigningKeyPath(path) => {
+                self.signing_key_path = path;
+                self.signing_key_selection = None;
+            }
             Message::BrowseInputFile => {
                 return Task::perform(
                     async {
@@ -640,6 +659,24 @@ impl StudioUi {
                 if let Some(path) = path {
                     self.input_path = path.to_string_lossy().into_owned();
                     self.input_selection = Some(path);
+                }
+            }
+            Message::BrowseSigningKey => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Select an Ed25519 private-key file")
+                            .pick_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    Message::SigningKeyPicked,
+                );
+            }
+            Message::SigningKeyPicked(path) => {
+                if let Some(path) = path {
+                    self.signing_key_path = path.to_string_lossy().into_owned();
+                    self.signing_key_selection = Some(path);
                 }
             }
             Message::BrowseOutput => {
@@ -970,12 +1007,32 @@ impl StudioUi {
         if self.job.is_some() {
             return Task::none();
         }
+        let operation = self.selected_operation.clone();
+        let secure_parameter = matches!(
+            operation.as_str(),
+            "signature-keygen"
+                | "signature-protect-key"
+                | "signature-export-public"
+                | "signature-create"
+        );
+        let parameter = if secure_parameter {
+            std::mem::take(&mut self.parameter)
+        } else {
+            self.parameter.clone()
+        };
+        let draft = if operation == "signature-create" {
+            selected_or_typed(self.signing_key_selection.as_ref(), &self.signing_key_path)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        };
         let request = Request {
-            operation: self.selected_operation.clone(),
+            operation,
             input: selected_or_typed(self.input_selection.as_ref(), &self.input_path),
             output: selected_or_typed(self.output_selection.as_ref(), &self.output_path),
-            parameter: self.parameter.clone(),
-            ..Request::default()
+            parameter,
+            draft,
         };
         self.submit(RequestKind::Operation, request)
     }
@@ -1649,6 +1706,41 @@ impl StudioUi {
         if self.job.is_none() && selected.is_some() {
             run = run.on_press(Message::RunOperation);
         }
+        let signing_key_row: Element<'_, Message> = if self.selected_operation == "signature-create"
+        {
+            row![
+                text("Ed25519 private key"),
+                text_input(
+                    "Choose an encrypted or legacy key file",
+                    &self.signing_key_path
+                )
+                .on_input(Message::SigningKeyPath)
+                .width(Length::Fill),
+                button("Browse key…").on_press(Message::BrowseSigningKey),
+            ]
+            .spacing(8)
+            .wrap()
+            .into()
+        } else {
+            row![].into()
+        };
+        let secret_parameter = matches!(
+            self.selected_operation.as_str(),
+            "signature-keygen"
+                | "signature-protect-key"
+                | "signature-export-public"
+                | "signature-create"
+        );
+        let parameter_label = if secret_parameter {
+            "Private-key passphrase (hidden while typing)"
+        } else {
+            "Operation parameter"
+        };
+        let parameter_placeholder = if secret_parameter {
+            "Enter passphrase; it is cleared after the operation starts"
+        } else {
+            "See operation description"
+        };
         scrollable(
             column![
                 text("Processing operations").size(22),
@@ -1681,9 +1773,11 @@ impl StudioUi {
                 ]
                 .spacing(8)
                 .wrap(),
-                text("Operation parameter"),
-                text_input("See operation description", &self.parameter)
-                    .on_input(Message::Parameter),
+                signing_key_row,
+                text(parameter_label),
+                text_input(parameter_placeholder, &self.parameter)
+                    .on_input(Message::Parameter)
+                    .secure(secret_parameter),
                 row![run].spacing(8),
                 text("Result and warnings"),
                 text(&self.operation_preview).wrapping(text::Wrapping::WordOrGlyph),

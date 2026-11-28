@@ -27,6 +27,7 @@ No capability is marked device-verified or released. Previous hosted jobs passed
 | manifest-create / manifest-verify | Versioned SHA-256 manifest using root-relative Unicode paths | Linux match/change/missing and traversal fixtures tested |
 | age-keygen | Generate an X25519 age identity; private identity is saved to a new key file | Linux fixture and owner-only Unix permissions tested |
 | age-encrypt / age-decrypt | Stream age X25519 file encryption and authenticated decryption, up to 4 GiB | Linux round-trip, wrong-key, tampering, collision and symlink fixtures tested |
+| signature-keygen / signature-protect-key / signature-export-public / signature-create / signature-verify | Ed25519 keys with age-scrypt protected schema-v2 seeds; backward-compatible schema-v1 plaintext import; stable v1 detached signature envelope | Protected-key roundtrip, wrong-passphrase, tamper, migration, no-overwrite and permission fixtures implemented; targeted and hosted tests pending |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |
 
 See section 04-07 and 10 of the master specification for complete targets.
