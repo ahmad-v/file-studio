@@ -7,6 +7,7 @@ mod exif_metadata;
 mod gzip_archive;
 mod jpeg_metadata;
 mod png_metadata;
+mod signature;
 mod tar_archive;
 use localwright_core::*;
 use serde::Deserialize;
@@ -49,6 +50,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation { id: "age-keygen", label: "Create age identity", hint: "Create a new X25519 identity file. Keep it private and backed up; only the public recipient key is shown." },
     Operation { id: "age-encrypt", label: "Encrypt with age", hint: "Enter an age X25519 recipient key and choose a new .age output. Streaming input limit: 4 GiB." },
     Operation { id: "age-decrypt", label: "Decrypt age file", hint: "Enter the path to a private age identity file and choose a new output. Authentication is checked before output is published." },
+    Operation { id: "signature-keygen", label: "Generate signing key", hint: "Create a new Ed25519 private key in a no-overwrite owner-only file. The public key and SHA-256 fingerprint are shown; private key JSON is not passphrase-encrypted." },
+    Operation { id: "signature-export-public", label: "Export signing public key", hint: "Input an owner-only File Studio Ed25519 private-key JSON and choose a new .pub.json output. Compare the fingerprint through a trusted channel." },
+    Operation { id: "signature-create", label: "Sign file", hint: "Create a detached Ed25519 signature for a regular file up to 4 GiB. Parameter is the owner-only private-key JSON path. Independently trust the signer fingerprint." },
+    Operation { id: "signature-verify", label: "Verify file signature", hint: r#"Input the original file. Parameter JSON: {"signature_path":"file.sig.json","trusted_public_key_path":"trusted.pub.json"}. The trusted public key is optional; without it, verification does not establish signer identity."# },
     Operation { id: "manifest-create", label: "Create checksum manifest", hint: "Create a versioned SHA-256 manifest for regular files below a directory. Choose a new .json output." },
     Operation { id: "manifest-verify", label: "Verify checksum manifest", hint: "Input a manifest JSON and enter its directory root as the parameter. Reports missing, changed and matching files without writing to them." },
     Operation { id: "backup-create", label: "Create versioned directory backup", hint: "Input a directory and choose a new .fsbackup archive. Includes regular files and empty directories; symlinks and special files are rejected. Per-file SHA-256 integrity manifest." },
@@ -1198,6 +1203,47 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             preview: serde_json::to_string_pretty(&report)?,
             written: Some(r.output),
             warnings: vec!["The saved identity file contains a private key. Restrict access to it and keep a secure backup. The recipient key is public. No passphrase is applied to the identity file.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "signature-keygen" {
+        let report = signature::generate_key(&r.output)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["The generated Ed25519 private key is not passphrase-encrypted. Store it in a protected location and keep permissions restricted. Never share it. A signature fingerprint must be trusted out of band.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "signature-export-public" {
+        let report = signature::export_public(&r.input, &r.output)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "signature-create" {
+        if r.parameter.trim().is_empty() {
+            return Err(Error::input("Enter the private-key JSON path as the parameter"));
+        }
+        let report = signature::sign(&r.input, &r.output, Path::new(r.parameter.trim()), &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["The detached signature is Ed25519 over a versioned SHA-256 digest envelope. Its embedded public key is not automatically trusted; verify its fingerprint through a separate channel.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "signature-verify" {
+        let report = signature::verify(&r.input, &r.parameter, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            warnings: vec![if report["trusted_key_matched"] == true {
+                "Signature verification succeeded and the key matched the selected trusted public-key file. This establishes key possession, not real-world identity.".into()
+            } else {
+                "Signature verification succeeded against the embedded public key, but signer identity is untrusted. Compare the reported fingerprint with a separately trusted value.".into()
+            }],
             ..Outcome::default()
         });
     }
