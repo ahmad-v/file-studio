@@ -26,6 +26,14 @@ struct Member {
     size: u64,
 }
 
+struct ArchivePlan {
+    file: File,
+    members: Vec<Member>,
+    total_bytes: u64,
+    archive_bytes: u64,
+    modified: Option<SystemTime>,
+}
+
 fn relative_member_path(name: &str, directory: bool) -> Result<PathBuf> {
     let mut body = name;
     while let Some(stripped) = body.strip_prefix("./") {
@@ -79,11 +87,7 @@ fn ensure_unchanged(
     Ok(())
 }
 
-fn plan_archive(
-    path: &Path,
-    job: &Job,
-    drain_payloads: bool,
-) -> Result<(File, Vec<Member>, u64, u64, Option<SystemTime>)> {
+fn plan_archive(path: &Path, job: &Job, drain_payloads: bool) -> Result<ArchivePlan> {
     let (file, archive_bytes, modified) = open_archive(path)?;
     let mut archive = tar::Archive::new(file);
     let mut members = Vec::new();
@@ -155,7 +159,13 @@ fn plan_archive(
     }
     let file = archive.into_inner();
     ensure_unchanged(&file, path, archive_bytes, modified)?;
-    Ok((file, members, total, archive_bytes, modified))
+    Ok(ArchivePlan {
+        file,
+        members,
+        total_bytes: total,
+        archive_bytes,
+        modified,
+    })
 }
 
 fn stream_entry(
@@ -192,7 +202,10 @@ fn stream_entry(
 }
 
 pub(super) fn list(path: &Path, job: &Job) -> Result<Value> {
-    let (_, members, total, archive_bytes, _) = plan_archive(path, job, false)?;
+    let plan = plan_archive(path, job, false)?;
+    let members = plan.members;
+    let total = plan.total_bytes;
+    let archive_bytes = plan.archive_bytes;
     let entries = members
         .iter()
         .map(|member| {
@@ -221,7 +234,10 @@ pub(super) fn list(path: &Path, job: &Job) -> Result<Value> {
 }
 
 pub(super) fn test(path: &Path, job: &Job) -> Result<Value> {
-    let (_, members, total, archive_bytes, _) = plan_archive(path, job, true)?;
+    let plan = plan_archive(path, job, true)?;
+    let members = plan.members;
+    let total = plan.total_bytes;
+    let archive_bytes = plan.archive_bytes;
     Ok(json!({
         "schema_version": 1,
         "format": "tar",
@@ -303,17 +319,18 @@ pub(super) fn create_directory(input: &Path, output: &Path, job: &Job) -> Result
             header.set_gid(0);
             header.set_mtime(0);
             header.set_cksum();
-            let mut reader = CheckedReader {
-                source: &mut source,
-                job,
-                read: 0,
-                expected: *expected_size,
+            let bytes_read = {
+                let mut reader = CheckedReader {
+                    source: &mut source,
+                    job,
+                    read: 0,
+                    expected: *expected_size,
+                };
+                builder
+                    .append_data(&mut header, archive_path, &mut reader)
+                    .map_err(|error| Error::input(format!("TAR creation failed: {error}")))?;
+                reader.read
             };
-            builder
-                .append_data(&mut header, archive_path, &mut reader)
-                .map_err(|error| Error::input(format!("TAR creation failed: {error}")))?;
-            let bytes_read = reader.read;
-            drop(reader);
             if bytes_read != *expected_size
                 || source.metadata()?.modified().ok() != opened.modified().ok()
             {
@@ -408,7 +425,12 @@ fn extract_member<R: Read>(
 }
 
 pub(super) fn extract_all(input: &Path, output: &Path, job: &Job) -> Result<Value> {
-    let (mut file, members, total, archive_bytes, modified) = plan_archive(input, job, false)?;
+    let plan = plan_archive(input, job, false)?;
+    let mut file = plan.file;
+    let members = plan.members;
+    let total = plan.total_bytes;
+    let archive_bytes = plan.archive_bytes;
+    let modified = plan.modified;
     if members.iter().all(|member| member.directory) {
         // Empty archives are valid, but an archive with no usable entries is
         // more likely to be a format mismatch than a useful extraction.
@@ -418,18 +440,19 @@ pub(super) fn extract_all(input: &Path, output: &Path, job: &Job) -> Result<Valu
     let result = (|| -> Result<()> {
         file.seek(SeekFrom::Start(0))?;
         let mut archive = tar::Archive::new(file);
-        let mut entries = archive
-            .entries()
-            .map_err(|error| Error::input(format!("Cannot reopen TAR members: {error}")))?;
-        for member in &members {
-            job.check()?;
-            let mut entry = entries
-                .next()
-                .ok_or_else(|| Error::input("TAR member disappeared during extraction"))?
-                .map_err(|error| Error::input(format!("Cannot read TAR member: {error}")))?;
-            extract_member(&mut entry, member, &root, job)?;
+        {
+            let mut entries = archive
+                .entries()
+                .map_err(|error| Error::input(format!("Cannot reopen TAR members: {error}")))?;
+            for member in &members {
+                job.check()?;
+                let mut entry = entries
+                    .next()
+                    .ok_or_else(|| Error::input("TAR member disappeared during extraction"))?
+                    .map_err(|error| Error::input(format!("Cannot read TAR member: {error}")))?;
+                extract_member(&mut entry, member, &root, job)?;
+            }
         }
-        drop(entries);
         let file = archive.into_inner();
         ensure_unchanged(&file, input, archive_bytes, modified)?;
         job.check()?;
@@ -464,7 +487,11 @@ pub(super) fn extract_entry(
     if selected == 0 {
         return Err(Error::input("TAR entry numbers start at 1"));
     }
-    let (mut file, members, _, archive_bytes, modified) = plan_archive(input, job, false)?;
+    let plan = plan_archive(input, job, false)?;
+    let mut file = plan.file;
+    let members = plan.members;
+    let archive_bytes = plan.archive_bytes;
+    let modified = plan.modified;
     let member = members
         .get(selected - 1)
         .ok_or_else(|| Error::input("TAR entry number is out of range"))?;
