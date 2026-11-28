@@ -33,10 +33,12 @@
     },
     {
       "operation": "directory-usage",
-      "description": "Logical directory size report",
+      "description": "Read-only logical file sizes grouped by top-level directory, displayed in a bounded native bar-chart preview",
       "status": "implemented-unverified",
-      "targets": [],
-      "fixture_status": "pending compilation"
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux fixture tested; native catalogue visualization awaits hosted checks"
     },
     {
       "operation": "zip-extract-entry",
