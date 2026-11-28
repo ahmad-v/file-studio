@@ -1,6 +1,7 @@
 //! Bounded view models for the native catalogue workspace.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 const MAX_ROWS: usize = 10_000;
 
@@ -42,6 +43,50 @@ pub struct DuplicateGroup {
     pub bytes_per_file: u64,
     pub blake3: String,
     pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryUsageReport {
+    pub schema_version: u32,
+    pub regular_files: usize,
+    pub total_bytes: u64,
+    pub root_bytes: u64,
+    pub directories: BTreeMap<String, u64>,
+}
+
+impl DirectoryUsageReport {
+    pub fn parse(input: &str) -> Result<Self, String> {
+        const MAX_DIRECTORIES: usize = 10_000;
+        let report: Self = serde_json::from_str(input).map_err(|error| error.to_string())?;
+        let directory_total = report
+            .directories
+            .values()
+            .try_fold(0u64, |sum, bytes| sum.checked_add(*bytes));
+        if report.schema_version != 1
+            || report.directories.len() > MAX_DIRECTORIES
+            || report
+                .root_bytes
+                .checked_add(directory_total.unwrap_or(u64::MAX))
+                != Some(report.total_bytes)
+            || report
+                .directories
+                .keys()
+                .any(|name| name.is_empty() || name.len() > 64 * 1024 || name.contains('\0'))
+        {
+            return Err("Directory usage report is inconsistent or exceeds display limits".into());
+        }
+        Ok(report)
+    }
+}
+
+/// Convert a byte count to a finite share of the directory total for charting.
+pub fn usage_fraction(bytes: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        (bytes as f64 / total as f64).clamp(0.0, 1.0) as f32
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -214,6 +259,22 @@ mod tests {
         .is_err());
         assert!(DuplicateReport::parse(
             r#"{"schema_version":1,"regular_files_scanned":2,"groups":[{"bytes_per_file":3,"blake3":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","paths":["a.txt"]}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_directory_usage_and_computes_stable_chart_fractions() {
+        let report = DirectoryUsageReport::parse(
+            r#"{"schema_version":1,"regular_files":3,"total_bytes":30,"root_bytes":10,"directories":{"alpha":15,"beta":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(report.directories["alpha"], 15);
+        assert_eq!(usage_fraction(15, 30), 0.5);
+        assert_eq!(usage_fraction(u64::MAX, u64::MAX), 1.0);
+        assert_eq!(usage_fraction(0, 0), 0.0);
+        assert!(DirectoryUsageReport::parse(
+            r#"{"schema_version":1,"regular_files":3,"total_bytes":31,"root_bytes":10,"directories":{"alpha":15,"beta":5}}"#,
         )
         .is_err());
     }
