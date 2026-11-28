@@ -184,6 +184,27 @@
       "fixture_status": "not run"
     },
     {
+      "operation": "backup-create",
+      "description": "Versioned bounded ZIP backup of a selected directory with per-file SHA-256 manifest; rejects links/special files and source/output overlap",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Round-trip, source preservation, symlink, cancellation and limit tests added; hosted verification pending"
+    },
+    {
+      "operation": "backup-verify",
+      "description": "Stream-read every backup entry and validate size, ZIP CRC and SHA-256 against the embedded versioned manifest",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Corruption and path escape fixtures added; hosted verification pending"
+    },
+    {
+      "operation": "backup-restore",
+      "description": "Verify first, then restore regular files and empty directories into a new no-overwrite destination with rollback on error",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Round-trip, collision, corruption and path escape tests added; hosted verification pending"
+    },
+    {
       "operation": "manifest-create",
       "description": "Create versioned SHA-256 manifests for regular files under a directory",
       "status": "implemented-unverified",
