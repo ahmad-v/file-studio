@@ -4,6 +4,7 @@ pub mod catalogue_workspace;
 mod encryption;
 mod gzip_archive;
 mod png_metadata;
+mod tar_archive;
 use localwright_core::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -69,6 +70,11 @@ pub const OPERATIONS: &[Operation] = &[
     Operation { id: "gzip-create", label: "Create GZIP file", hint: "Compress one regular file to a new .gz file using the Rust-native GZIP encoder. Source and compressed output limits: 1 GiB each. Original file is unchanged." },
     Operation { id: "gzip-extract", label: "Extract GZIP file", hint: "Decompress one GZIP stream, including concatenated members, to a new selected file. Compressed input and expanded output are each limited to 1 GiB. CRC and size are checked; original archive is unchanged." },
     Operation { id: "gzip-test", label: "Test GZIP integrity", hint: "Stream-decompress one GZIP file to a sink to validate CRC and size without writing extracted data. Compressed input and expanded data are each limited to 1 GiB." },
+    Operation { id: "tar-list", label: "List TAR contents", hint: "Inspect a bounded TAR archive's safe paths and declared sizes without reading member payloads. Rejects links and special entries." },
+    Operation { id: "tar-test", label: "Test TAR structure and members", hint: "Validate TAR headers and fully read regular member data within fixed limits. TAR does not provide payload checksums or authenticity." },
+    Operation { id: "tar-create-directory", label: "Create TAR from directory", hint: "Create a new .tar from up to 4,096 regular files (32 MiB each, 128 MiB total). Symlinks are skipped; file ownership, times and extended attributes are omitted." },
+    Operation { id: "tar-extract-entry", label: "Extract one TAR entry", hint: "Use the one-based entry number shown by List TAR contents. Extract one regular file to a new path; traversal, links, special files and collisions are rejected." },
+    Operation { id: "tar-extract-all", label: "Extract TAR archive", hint: "Extract regular files and directories into a new folder. Traversal, links, special files, collisions and archives beyond documented limits are rejected." },
     Operation {
         id: "duplicates",
         label: "Find duplicate candidates",
@@ -1300,8 +1306,34 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 ..Outcome::default()
             });
         }
+        "tar-create-directory" | "tar-extract-entry" | "tar-extract-all" => {
+            let (report, warning) = if r.operation == "tar-create-directory" {
+                (
+                    tar_archive::create_directory(&r.input, &r.output, &j)?,
+                    "The TAR stores regular file contents only. Symbolic links, empty directories, ownership, timestamps and extended attributes are omitted.".to_string(),
+                )
+            } else if r.operation == "tar-extract-all" {
+                (
+                    tar_archive::extract_all(&r.input, &r.output, &j)?,
+                    "Extracted untrusted file bytes into a new folder. Review files before opening them. TAR payloads have no standard content checksum or authenticity proof.".to_string(),
+                )
+            } else {
+                (
+                    tar_archive::extract_entry(&r.input, &r.output, &r.parameter, &j)?,
+                    "Extracted untrusted file bytes to a new file. TAR payloads have no standard content checksum or authenticity proof; review content before opening it.".to_string(),
+                )
+            };
+            return Ok(Outcome {
+                preview: serde_json::to_string_pretty(&report)?,
+                written: Some(r.output),
+                warnings: vec![warning],
+                ..Outcome::default()
+            });
+        }
         "zip-list" => list_zip(&r.input, &j)?,
         "zip-test" => test_zip(&r.input, &j)?,
+        "tar-list" => tar_archive::list(&r.input, &j)?,
+        "tar-test" => tar_archive::test(&r.input, &j)?,
         "gzip-test" => gzip_archive::test(&r.input, &j)?,
         "file-times" => file_times(&r.input)?,
         "catalog-compare" => catalog::compare(&r.input, Path::new(&r.parameter), &j)?,
