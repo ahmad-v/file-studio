@@ -149,7 +149,7 @@ pub fn create(input: &Path, output: &Path, job: &Job) -> Result<Value> {
             if !opened.is_file()
                 || opened.len() != entry.bytes
                 || opened.modified().ok() != entry.modified
-                || !same_file_identity(&path_metadata, &opened)
+                || !same_file_identity(&path, &source)?
             {
                 return Err(Error::input("Source file changed before backup"));
             }
@@ -181,7 +181,7 @@ pub fn create(input: &Path, output: &Path, job: &Job) -> Result<Value> {
                 || path_after.file_type().is_symlink()
                 || path_after.len() != entry.bytes
                 || path_after.modified().ok() != entry.modified
-                || !same_file_identity(&after, &path_after)
+                || !same_file_identity(&path, &source)?
             {
                 return Err(Error::input("Source file changed during backup"));
             }
@@ -435,25 +435,12 @@ fn collect_tree(root: &Path, job: &Job) -> Result<Vec<SourceEntry>> {
     Ok(result)
 }
 
-fn same_file_identity(path_metadata: &fs::Metadata, opened: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        path_metadata.dev() == opened.dev() && path_metadata.ino() == opened.ino()
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        path_metadata
-            .volume_serial_number()
-            .zip(path_metadata.file_index())
-            == opened.volume_serial_number().zip(opened.file_index())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (path_metadata, opened);
-        true
-    }
+fn same_file_identity(path: &Path, opened: &File) -> Result<bool> {
+    // Use stable cross-platform handle APIs, including on Windows where the
+    // corresponding standard-library MetadataExt methods remain unstable.
+    let opened_handle = same_file::Handle::from_file(opened.try_clone()?)?;
+    let path_handle = same_file::Handle::from_path(path)?;
+    Ok(opened_handle == path_handle)
 }
 
 fn plan_archive<R: Read + std::io::Seek>(
