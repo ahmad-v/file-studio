@@ -137,7 +137,7 @@
     },
     {
       "operation": "catalog-history",
-      "description": "Read recent scan timestamps, root labels, size/file totals, and safe refresh delta classifications from a SQLite catalogue",
+      "description": "Read recent scan timestamps, root labels, size/file totals, and refresh deltas classified by size plus available file modification times",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"

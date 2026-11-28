@@ -84,7 +84,7 @@ impl SearchReport {
 impl HistoryReport {
     pub fn parse(input: &str) -> Result<Self, String> {
         let report: Self = serde_json::from_str(input).map_err(|error| error.to_string())?;
-        if !(1..=2).contains(&report.schema_version) {
+        if !(1..=3).contains(&report.schema_version) {
             return Err("Unsupported catalogue history report version".into());
         }
         if report.scans.len() > 100
@@ -191,13 +191,13 @@ mod tests {
     #[test]
     fn parses_history_and_bounds_displayed_rows() {
         let report = HistoryReport::parse(
-            r#"{"schema_version":2,"scans":[{"scan_id":3,"scanned_unix_ms":1760000000000,"root_label":"Research","files":7,"total_bytes":"987654321","comparison_mode":"same-source","added":2,"changed":1,"removed":3}],"truncated":false}"#,
+            r#"{"schema_version":3,"scans":[{"scan_id":3,"scanned_unix_ms":1760000000000,"root_label":"Research","files":7,"total_bytes":"987654321","comparison_mode":"same-source","added":2,"changed":1,"removed":3}],"truncated":false}"#,
         )
         .unwrap();
         assert_eq!(report.scans[0].root_label, "Research");
         assert_eq!(report.scans[0].comparison_mode, "same-source");
         assert!(
-            HistoryReport::parse(r#"{"schema_version":3,"scans":[],"truncated":false}"#).is_err()
+            HistoryReport::parse(r#"{"schema_version":4,"scans":[],"truncated":false}"#).is_err()
         );
     }
 

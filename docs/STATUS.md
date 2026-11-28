@@ -24,7 +24,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 | catalog-search | Search a saved version 1 inventory by path text | Linux unit fixture and CLI-tested |
 | catalog-history | List the latest 100 saved SQLite scan snapshots without opening the source volume | Rust 1.89 Linux default-feature integration tested; hosted five-target verification pending |
 | catalog-compare-snapshots | Compare chosen retained scans; report source identity match and path/size deltas, offline | Focused Linux end-to-end fixture passed; hosted GUI/platform verification pending |
-| catalog-refresh | Append schema-v2 snapshots; compare added/size-changed/removed paths only for matching Unix source identity; preserve history and migrate v1 | Implemented; targeted source tests added, not run locally due disk constraints; hosted verification pending |
+| catalog-refresh | Append schema-v3 snapshots; compare added/removed/changed paths by size and available modification time only for matching stable source identity; preserve history and migrate v1/v2 | Local migration and same-size timestamp-change fixtures pass; hosted verification pending |
 | scan | Bounded directory inventory; JSON/CSV or new SQLite snapshot | Linux JSON/CSV/SQLite fixture-tested; five-target hosted verification pending |
 
 ## Native catalogue workspace
