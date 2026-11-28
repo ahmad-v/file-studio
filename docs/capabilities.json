@@ -24,10 +24,12 @@
     },
     {
       "operation": "duplicates",
-      "description": "Read-only duplicate candidate groups",
+      "description": "Read-only duplicate candidates: equal-size files are compared by BLAKE3 and matching-hash groups are reported; 1 GiB candidate-data limit",
       "status": "implemented-unverified",
-      "targets": [],
-      "fixture_status": "pending compilation"
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "fixture_status": "Linux duplicate fixture passed; native Catalogue UI integration pending"
     },
     {
       "operation": "directory-usage",
@@ -135,7 +137,7 @@
     },
     {
       "operation": "catalog-history",
-      "description": "Read recent scan timestamps, root labels, size/file totals, and safe refresh delta classifications from a SQLite catalogue",
+      "description": "Read recent scan timestamps, root labels, size/file totals, and refresh deltas classified by size plus available file modification times",
       "status": "implemented-unverified",
       "targets": [
         "x86_64-unknown-linux-gnu"

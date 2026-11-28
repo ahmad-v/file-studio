@@ -90,7 +90,7 @@ pub const OPERATIONS: &[Operation] = &[
         label: "Search a saved file inventory",
         hint: "Input a saved JSON inventory or SQLite catalogue and enter a path fragment. Search works while the source drive is disconnected. Optional new JSON report.",
     },
-    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies path changes only when the Unix filesystem/root identity matches the prior scan; unknown or changed identities are stored as a full-rescan baseline. Inaccessible paths produce a partial report and preserve the previous catalogue history." },
+    Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies additions, removals and changes only when the stable source identity matches; changed includes size or available modification-time differences. Unknown or changed identities are stored as a full-rescan baseline. Inaccessible paths produce a partial report and preserve the previous catalogue history; incomplete scans are never saved as catalogue snapshots or used to infer removals." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
     Operation { id: "catalog-compare-snapshots", label: "Compare catalogue snapshots", hint: "Input a saved File Studio .sqlite catalogue. Parameter JSON: {\"before_scan_id\":1,\"after_scan_id\":2}. Compares two retained snapshots without accessing the source volume." },
     Operation {
@@ -115,6 +115,15 @@ fn identify(b: &[u8]) -> &'static str {
     } else {
         "unknown"
     }
+}
+fn modified_unix_ms(value: std::io::Result<std::time::SystemTime>) -> Option<i64> {
+    use std::time::UNIX_EPOCH;
+    let time = value.ok()?;
+    let milliseconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_millis()).ok()?,
+        Err(error) => -i128::try_from(error.duration().as_nanos().div_ceil(1_000_000)).ok()?,
+    };
+    i64::try_from(milliseconds).ok()
 }
 fn file_times(path: &Path) -> Result<Value> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -909,7 +918,7 @@ fn scan(root: &Path, j: &Job) -> Result<ScanReport> {
                     .strip_prefix(root)
                     .map_err(|_| Error::input("Path escaped scan root"))?;
                 if let Some(relative) = relative.to_str() {
-                    report.files.push(json!({"path":relative,"bytes":m.len()}));
+                    report.files.push(json!({"path":relative,"bytes":m.len(),"modified_unix_ms":modified_unix_ms(m.modified())}));
                 } else {
                     report.mark_incomplete(
                         root,
@@ -1444,7 +1453,7 @@ pub fn handle_workspace(r: Request, j: Job) -> Result<Outcome> {
         preview: serde_json::to_string_pretty(&report)?,
         written: Some(r.output),
         warnings: vec![
-            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts are inferred only when the stable source identity matches; otherwise no cross-source comparison is claimed.".into(),
+            "A complete read-only scan was appended to the existing catalogue. Earlier history remains available. Change counts use file size and available modification times only when stable source identity matches; content changes preserving both attributes may be missed. Otherwise no cross-source comparison is claimed.".into(),
         ],
         ..Outcome::default()
     })
