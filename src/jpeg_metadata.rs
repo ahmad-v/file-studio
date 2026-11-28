@@ -30,6 +30,7 @@ pub fn process(input: &Path, output: Option<&Path>, job: &Job) -> Result<Value> 
             Kind::Xmp => xmp += 1,
             Kind::Photoshop => photoshop += 1,
             Kind::Other => {}
+            Kind::Tail => {}
         }
     }
     let removed = exif + xmp + photoshop;
