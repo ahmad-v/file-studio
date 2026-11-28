@@ -1482,6 +1482,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         } else if r.operation == "jpeg-metadata" {
             "Reports recognized metadata-bearing JPEG APP segment counts; tag values are not decoded."
                 .into()
+        } else if r.operation == "exif-metadata" {
+            "EXIF values may disclose GPS coordinates, device identifiers, timestamps or other sensitive information. The report is bounded and should be reviewed before sharing."
+                .into()
         } else if r.operation == "hex-preview" {
             "The report contains raw file bytes. Review it before sharing.".into()
         } else if r.operation == "zip-test" {
