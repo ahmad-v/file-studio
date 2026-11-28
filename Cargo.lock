@@ -1175,6 +1175,7 @@ dependencies = [
  "crc32fast",
  "csv",
  "file-id",
+ "flate2",
  "futures",
  "iced",
  "localwright-core",
