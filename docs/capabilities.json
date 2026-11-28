@@ -95,6 +95,13 @@
       "fixture_status": "Linux fixture and independent PNG pixel and metadata checks passed"
     },
     {
+      "operation": "exif-metadata",
+      "description": "Read bounded EXIF tag values from JPEG, TIFF, HEIF/HEIC/AVIF, PNG and WebP using kamadak-exif 0.5.5",
+      "status": "implemented-unverified",
+      "targets": [],
+      "fixture_status": "Synthetic TIFF fixture added; hosted Check pending"
+    },
+    {
       "operation": "jpeg-metadata",
       "description": "Bounded recognition/counting of standard EXIF APP1, Adobe XMP APP1 and Photoshop APP13 segments in JPEG headers",
       "status": "implemented-unverified",

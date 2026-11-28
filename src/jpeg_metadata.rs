@@ -72,7 +72,7 @@ struct Segment<'a> {
     bytes: &'a [u8],
 }
 
-fn parse(bytes: &[u8], job: &Job) -> Result<Vec<Segment<'_>>> {
+fn parse<'a>(bytes: &'a [u8], job: &Job) -> Result<Vec<Segment<'a>>> {
     if !bytes.starts_with(&[0xff, 0xd8]) {
         return Err(Error::input("Expected JPEG SOI signature"));
     }

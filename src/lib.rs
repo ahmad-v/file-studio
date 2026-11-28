@@ -2,6 +2,7 @@
 mod catalog;
 pub mod catalogue_workspace;
 mod encryption;
+mod exif_metadata;
 mod gzip_archive;
 mod jpeg_metadata;
 mod png_metadata;
@@ -33,6 +34,7 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation { id: "jpeg-metadata", label: "Inspect JPEG metadata segments", hint: "Identify JPEG EXIF, XMP and Photoshop/IPTC metadata segments without decoding image pixels. Optional JSON output." },
     Operation { id: "jpeg-strip-metadata", label: "Remove supported JPEG metadata", hint: "Copy a JPEG without recognized EXIF, XMP and Photoshop/IPTC APP segments. Choose a new .jpg or .jpeg output; other segments and scan data are preserved." },
+    Operation { id: "exif-metadata", label: "Inspect EXIF fields", hint: "Read bounded EXIF fields from supported JPEG, TIFF, HEIF/HEIC/AVIF, PNG or WebP files. GPS and device fields can be sensitive. Optional JSON output." },
     Operation {
         id: "hex-preview",
         label: "Hex preview",
@@ -1230,6 +1232,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             });
         }
         "jpeg-metadata" => jpeg_metadata::process(&r.input, None, &j)?,
+        "exif-metadata" => exif_metadata::inspect(&r.input, &j)?,
         "jpeg-strip-metadata" => {
             let report = jpeg_metadata::process(&r.input, Some(&r.output), &j)?;
             return Ok(Outcome {
