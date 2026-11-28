@@ -375,8 +375,8 @@ fn destination_root(output: &Path) -> Result<PathBuf> {
     fs::canonicalize(&root).map_err(Error::from)
 }
 
-fn extract_member(
-    entry: &mut tar::Entry<'_, io::Empty>,
+fn extract_member<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
     member: &Member,
     root: &Path,
     job: &Job,
@@ -533,6 +533,18 @@ mod tests {
         bytes
     }
 
+    fn forge_first_member_path(bytes: &mut [u8], name: &[u8]) {
+        assert!(name.len() < 100);
+        let header = &mut bytes[..512];
+        header[..100].fill(0);
+        header[..name.len()].copy_from_slice(name);
+        header[148..156].fill(b' ');
+        let checksum = header.iter().map(|byte| u64::from(*byte)).sum::<u64>();
+        let encoded = format!("{checksum:06o}\0 ");
+        assert_eq!(encoded.len(), 8);
+        header[148..156].copy_from_slice(encoded.as_bytes());
+    }
+
     #[test]
     fn standard_dot_prefixes_are_normalized_but_traversal_is_rejected() {
         assert_eq!(
@@ -666,7 +678,9 @@ mod tests {
     fn unsafe_paths_are_rejected_before_extraction() {
         let directory = tempdir().unwrap();
         let archive = directory.path().join("traversal.tar");
-        fs::write(&archive, fixture(&[("../outside.txt", b"bad")])).unwrap();
+        let mut bytes = fixture(&[("safe.txt", b"bad")]);
+        forge_first_member_path(&mut bytes, b"../outside.txt");
+        fs::write(&archive, bytes).unwrap();
         assert!(list(&archive, &Job::new()).is_err());
         let destination = directory.path().join("out");
         assert!(extract_all(&archive, &destination, &Job::new()).is_err());
