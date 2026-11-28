@@ -111,6 +111,7 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation { id: "catalog-refresh", label: "Refresh catalogue", hint: "Input a directory and enter an existing File Studio .sqlite catalogue path as Parameter. Appends a complete versioned scan and classifies additions, removals and changes only when the stable source identity matches; changed includes size or available modification-time differences. Unknown or changed identities are stored as a full-rescan baseline. Inaccessible paths produce a partial report and preserve the previous catalogue history." },
     Operation { id: "catalog-history", label: "View catalogue scan history", hint: "Input a File Studio .sqlite catalogue to list its latest 100 scan snapshots without accessing the original drive. Optional JSON report." },
+    Operation { id: "catalog-backup", label: "Back up catalogue database", hint: "Create a transactionally consistent SQLite copy of a File Studio catalogue at a new .sqlite or .sqlite3 path. Retains scan history, validates SQLite integrity and reports a SHA-256 digest; existing outputs are never overwritten." },
     Operation { id: "catalog-compare-snapshots", label: "Compare catalogue snapshots", hint: "Input a saved File Studio .sqlite catalogue. Parameter JSON: {\"before_scan_id\":1,\"after_scan_id\":2}. Compares two retained snapshots without accessing the source volume." },
     Operation {
         id: "scan",
@@ -1238,6 +1239,15 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             preview: serde_json::to_string_pretty(&report)?,
             written: Some(r.output),
             warnings: vec!["Restored files are untrusted user data. The restore created a new directory and did not overwrite existing paths. Verify important files against a trusted independent source; the embedded manifest is not signed.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "catalog-backup" {
+        let report = catalog::backup_database(&r.input, &r.output, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["This is a copy of the File Studio catalogue database and its scan history, not a backup of the catalogued source files. Keep the reported SHA-256 separately if you need an independently trusted integrity reference.".into()],
             ..Outcome::default()
         });
     }

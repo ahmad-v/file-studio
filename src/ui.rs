@@ -112,6 +112,7 @@ enum Page {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestKind {
     CreateCatalogue,
+    BackupCatalogue,
     Search,
     History,
     Refresh,
@@ -312,8 +313,10 @@ enum Message {
     Query(String),
     BrowseCatalogue,
     CreateCatalogue,
+    BackupCatalogue,
     CataloguePicked(Option<PathBuf>),
     CatalogueCreatedPath(Option<PathBuf>),
+    CatalogueBackupPath(Option<PathBuf>),
     BrowseRoot,
     RootPicked(Option<PathBuf>),
     Search,
@@ -488,6 +491,24 @@ impl StudioUi {
                     Message::CatalogueCreatedPath,
                 );
             }
+            Message::BackupCatalogue => {
+                if self.job.is_some() || self.catalogue_path.trim().is_empty() {
+                    self.status = "Open a saved SQLite catalogue before backing it up.".into();
+                    return Task::none();
+                }
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Create a catalogue database backup")
+                            .add_filter("SQLite catalogue backup", &["sqlite", "sqlite3"])
+                            .set_file_name("catalogue-backup.sqlite")
+                            .save_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    Message::CatalogueBackupPath,
+                );
+            }
             Message::CatalogueCreatedPath(Some(path)) => {
                 if !is_sqlite_catalogue_path(&path) {
                     self.status = "Choose a .sqlite or .sqlite3 catalogue path.".into();
@@ -502,6 +523,23 @@ impl StudioUi {
                 return self.submit(RequestKind::CreateCatalogue, request);
             }
             Message::CatalogueCreatedPath(None) => {}
+            Message::CatalogueBackupPath(Some(path)) => {
+                if !is_sqlite_catalogue_path(&path) {
+                    self.status = "Choose a .sqlite or .sqlite3 backup path.".into();
+                    return Task::none();
+                }
+                let request = Request {
+                    operation: "catalog-backup".into(),
+                    input: selected_or_typed(
+                        self.catalogue_selection.as_ref(),
+                        &self.catalogue_path,
+                    ),
+                    output: path,
+                    ..Request::default()
+                };
+                return self.submit(RequestKind::BackupCatalogue, request);
+            }
+            Message::CatalogueBackupPath(None) => {}
             Message::CataloguePicked(path) => {
                 if let Some(path) = path {
                     self.catalogue_path = path.to_string_lossy().into_owned();
@@ -996,6 +1034,21 @@ impl StudioUi {
                 self.status = "Catalogue created. Loading the first scan snapshot…".into();
                 return self.start_history();
             }
+            RequestKind::BackupCatalogue => {
+                let path = outcome
+                    .written
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(no output path)".into());
+                let report = serde_json::from_str::<serde_json::Value>(&outcome.preview).ok();
+                let digest = report
+                    .as_ref()
+                    .and_then(|report| report["sha256"].as_str())
+                    .unwrap_or("unavailable");
+                self.status = format!(
+                    "Catalogue backup created at {path}. SQLite integrity passed; SHA-256 {digest}."
+                );
+            }
             RequestKind::Search => match SearchReport::parse(&outcome.preview) {
                 Ok(report) => {
                     self.status = format!(
@@ -1280,6 +1333,10 @@ impl StudioUi {
             button("Load history").on_press_maybe(
                 (self.job.is_none() && !self.catalogue_path.trim().is_empty())
                     .then_some(Message::LoadHistory)
+            ),
+            button("Back up…").on_press_maybe(
+                (self.job.is_none() && !self.catalogue_path.trim().is_empty())
+                    .then_some(Message::BackupCatalogue)
             ),
         ]
         .spacing(8)
@@ -1641,6 +1698,7 @@ impl StudioUi {
 fn request_title(kind: RequestKind) -> &'static str {
     match kind {
         RequestKind::CreateCatalogue => "Catalogue creation",
+        RequestKind::BackupCatalogue => "Catalogue backup",
         RequestKind::Search => "Catalogue search",
         RequestKind::History => "Scan history",
         RequestKind::Refresh => "Catalogue refresh",
@@ -1725,6 +1783,22 @@ mod tests {
             ui.search_results.as_ref().unwrap().files[0].path,
             "file-204"
         );
+    }
+
+    #[test]
+    fn catalogue_backup_completion_surfaces_integrity_and_digest() {
+        let mut ui = StudioUi::new(OPERATIONS, no_op);
+        let _ = ui.finish_request(
+            RequestKind::BackupCatalogue,
+            Outcome {
+                preview: r#"{"integrity_check":"ok","sha256":"abc123"}"#.into(),
+                written: Some(PathBuf::from("archive.sqlite")),
+                ..Outcome::default()
+            },
+        );
+        assert!(ui.status.contains("archive.sqlite"));
+        assert!(ui.status.contains("integrity passed"));
+        assert!(ui.status.contains("abc123"));
     }
 
     #[test]

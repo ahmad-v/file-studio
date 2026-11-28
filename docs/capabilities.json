@@ -168,6 +168,13 @@
       "fixture_status": "Linux integration fixture verified two retained scan records without source access"
     },
     {
+      "operation": "catalog-backup",
+      "description": "Create a SQLite online backup of a File Studio catalogue; validate integrity and atomically publish to a new path without overwrite, returning SHA-256",
+      "status": "implemented-unverified",
+      "targets": ["x86_64-unknown-linux-gnu"],
+      "fixture_status": "Added source-preservation, historical snapshot, integrity and no-overwrite tests; local verification pending"
+    },
+    {
       "operation": "catalog-compare-snapshots",
       "description": "Compare two retained SQLite catalogue snapshots without accessing their source volume; include stable source identity match status",
       "status": "implemented-unverified",

@@ -20,6 +20,7 @@ Alpha source is on GitHub. The initial Rust integration checks ran on Linux x86_
 | zip-extract-all | Extract a bounded ZIP to a new directory with traversal/link rejection | Linux round-trip and traversal fixture-tested |
 | manifest-create / manifest-verify | Versioned relative-path SHA-256 manifest and match/change/missing report | Linux fixture-tested |
 | backup-create / backup-verify / backup-restore | Bounded versioned ZIP directory backup, per-file SHA-256 verification, and verify-first restore to a new directory | Implementation and tests added; hosted Check/Integration pending |
+| catalog-backup | Transactionally consistent SQLite online backup with same-directory atomic no-clobber publication, schema and integrity validation, retained history, bounded size, cancellation/progress, and SHA-256 report | Local Rust regression and full headless suite pass; native GUI integration added; five-target hosted verification pending |
 | age-keygen | Generate a standard X25519 identity and save it with owner-only permissions on Unix | Linux fixture-tested |
 | age-encrypt / age-decrypt | Streaming age X25519 encryption and authenticated decryption; reject weak Unix identity-file permissions and never overwrite outputs | Linux fixture-tested |
 | zip-test | Stored and Deflate ZIP checksum tests without extraction | Linux fixture-tested |

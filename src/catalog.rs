@@ -1,18 +1,28 @@
 use localwright_core::{read_bounded, write_new, Error, ErrorKind, Job, Result};
-use rusqlite::{config::DbConfig, limits::Limit, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    backup::{Backup, StepResult},
+    config::DbConfig,
+    limits::Limit,
+    Connection, OpenFlags, OptionalExtension,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Read},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const CATALOG_APPLICATION_ID: i64 = 0x4c57_5243;
 const CATALOG_SCHEMA_VERSION: i64 = 3;
 const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PATH_BYTES: i32 = 64 * 1024;
+const BACKUP_STEP_PAGES: i32 = 128;
+const BACKUP_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn sqlite_error(error: rusqlite::Error) -> Error {
     Error::input(format!("Catalogue database error: {error}"))
@@ -511,6 +521,141 @@ pub fn history(path: &Path, job: &Job) -> Result<Value> {
     Ok(json!({ "schema_version": CATALOG_SCHEMA_VERSION, "scans": scans, "truncated": truncated }))
 }
 
+/// Create a transactionally consistent, no-clobber copy of a File Studio
+/// catalogue with SQLite's online backup API. The result remains a normal
+/// searchable catalogue and is published only after integrity validation.
+pub fn backup_database(source_path: &Path, output_path: &Path, job: &Job) -> Result<Value> {
+    if !is_sqlite_path(output_path) || output_path.file_name().is_none() {
+        return Err(Error::input("Choose a new .sqlite or .sqlite3 backup path"));
+    }
+    let source = open_catalog(source_path, false)?;
+    let source_canonical = fs::canonicalize(source_path)?;
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent)?;
+    let destination = parent.join(
+        output_path
+            .file_name()
+            .ok_or_else(|| Error::input("Choose a backup filename"))?,
+    );
+    if destination == source_canonical {
+        return Err(Error::input("Catalogue backup must use a different path"));
+    }
+    job.check()?;
+
+    // A same-directory temporary file lets the finished backup be published
+    // atomically with no-clobber semantics, including on Windows.
+    let temporary_path = tempfile::NamedTempFile::new_in(&parent)?.into_temp_path();
+    let mut target = Connection::open_with_flags(
+        &temporary_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(sqlite_error)?;
+    configure(&target)?;
+    target
+        .execute_batch(&format!(
+            "PRAGMA page_size=4096; PRAGMA max_page_count={}; PRAGMA trusted_schema=OFF;",
+            MAX_CATALOG_BYTES / 4096
+        ))
+        .map_err(sqlite_error)?;
+    {
+        let backup = Backup::new(&source, &mut target).map_err(sqlite_error)?;
+        let busy_since = Instant::now();
+        loop {
+            job.check()?;
+            match backup.step(BACKUP_STEP_PAGES).map_err(sqlite_error)? {
+                StepResult::Done => break,
+                StepResult::More => {
+                    let progress = backup.progress();
+                    job.progress(
+                        progress.pagecount.saturating_sub(progress.remaining).max(0) as u64,
+                        progress.pagecount.max(0) as u64,
+                    );
+                }
+                StepResult::Busy | StepResult::Locked => {
+                    if busy_since.elapsed() >= BACKUP_BUSY_TIMEOUT {
+                        return Err(Error::input(
+                            "Catalogue remained busy for 30 seconds; backup was not published",
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                _ => return Err(Error::input("SQLite returned an unsupported backup state")),
+            }
+        }
+    }
+    target.close().map_err(|(_, error)| sqlite_error(error))?;
+
+    job.check()?;
+    let validation = open_catalog(&temporary_path, false)?;
+    let integrity: String = validation
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(sqlite_error)?;
+    if integrity != "ok" {
+        return Err(Error::input(
+            "SQLite rejected the completed catalogue backup",
+        ));
+    }
+    let scans: i64 = validation
+        .query_row("SELECT COUNT(*) FROM scans", [], |row| row.get(0))
+        .map_err(sqlite_error)?;
+    validation
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+
+    let metadata = fs::metadata(&temporary_path)?;
+    if metadata.len() > MAX_CATALOG_BYTES {
+        return Err(Error::new(
+            ErrorKind::Limit,
+            "Catalogue backup exceeds the 64 MiB database limit",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary_path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        job.check()?;
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    file.sync_all()?;
+    let sha256 = format!("{:x}", digest.finalize());
+    job.check()?;
+    temporary_path
+        .persist_noclobber(&destination)
+        .map_err(|error| {
+            if error.error.kind() == io::ErrorKind::AlreadyExists {
+                Error::input("Backup destination already exists; no file was overwritten")
+            } else {
+                Error::input(format!(
+                    "Could not publish catalogue backup: {}",
+                    error.error
+                ))
+            }
+        })?;
+    let bytes = fs::metadata(&destination)?.len();
+    Ok(json!({
+        "format": "file-studio-sqlite-catalogue",
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "bytes": bytes,
+        "scan_snapshots": scans,
+        "sha256": sha256,
+        "integrity_check": "ok",
+        "source_unchanged": true,
+    }))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotComparisonRequest {
@@ -761,6 +906,72 @@ mod tests {
                 modified_unix_ms: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn online_catalogue_backup_retains_history_and_never_overwrites() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let catalog_path = directory.path().join("catalog.sqlite");
+        create(
+            &root,
+            &[json!({"path":"first.txt","bytes":7,"modified_unix_ms":1000})],
+            &catalog_path,
+            &Job::new(),
+        )
+        .unwrap();
+        refresh(
+            &catalog_path,
+            &root,
+            &[
+                json!({"path":"first.txt","bytes":8,"modified_unix_ms":2000}),
+                json!({"path":"second.txt","bytes":4,"modified_unix_ms":2000}),
+            ],
+            &Job::new(),
+        )
+        .unwrap();
+
+        let backup_path = directory.path().join("copy.sqlite");
+        let report = backup_database(&catalog_path, &backup_path, &Job::new()).unwrap();
+        assert_eq!(report["integrity_check"], "ok");
+        assert_eq!(report["scan_snapshots"], 2);
+        assert_eq!(report["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            history(&catalog_path, &Job::new()).unwrap(),
+            history(&backup_path, &Job::new()).unwrap()
+        );
+
+        fs::write(directory.path().join("existing.sqlite"), b"preserve me").unwrap();
+        let error = backup_database(
+            &catalog_path,
+            &directory.path().join("existing.sqlite"),
+            &Job::new(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("already exists"));
+        assert_eq!(
+            fs::read(directory.path().join("existing.sqlite")).unwrap(),
+            b"preserve me"
+        );
+
+        let cancelled_path = directory.path().join("cancelled.sqlite");
+        let cancelled = Job::new();
+        cancelled.cancel();
+        assert!(backup_database(&catalog_path, &cancelled_path, &cancelled).is_err());
+        assert!(!cancelled_path.exists());
+
+        #[cfg(unix)]
+        {
+            let linked_source = directory.path().join("linked-catalog.sqlite");
+            std::os::unix::fs::symlink(&catalog_path, &linked_source).unwrap();
+            assert!(backup_database(
+                &linked_source,
+                &directory.path().join("linked-copy.sqlite"),
+                &Job::new(),
+            )
+            .is_err());
+        }
     }
 
     #[test]
