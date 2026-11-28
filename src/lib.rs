@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod backup;
 mod catalog;
 pub mod catalogue_workspace;
 mod encryption;
@@ -50,6 +51,9 @@ pub const OPERATIONS: &[Operation] = &[
     Operation { id: "age-decrypt", label: "Decrypt age file", hint: "Enter the path to a private age identity file and choose a new output. Authentication is checked before output is published." },
     Operation { id: "manifest-create", label: "Create checksum manifest", hint: "Create a versioned SHA-256 manifest for regular files below a directory. Choose a new .json output." },
     Operation { id: "manifest-verify", label: "Verify checksum manifest", hint: "Input a manifest JSON and enter its directory root as the parameter. Reports missing, changed and matching files without writing to them." },
+    Operation { id: "backup-create", label: "Create versioned directory backup", hint: "Input a directory and choose a new .fsbackup archive. Includes regular files and empty directories; symlinks and special files are rejected. Per-file SHA-256 integrity manifest." },
+    Operation { id: "backup-verify", label: "Verify directory backup", hint: "Input a .fsbackup archive. Reads every file and checks its SHA-256 against the embedded versioned manifest. Optional JSON report." },
+    Operation { id: "backup-restore", label: "Restore directory backup", hint: "Input a verified .fsbackup archive and choose a new destination directory. Existing destinations are never overwritten." },
     Operation {
         id: "zip-list",
         label: "List ZIP contents",
@@ -1219,6 +1223,24 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
             ..Outcome::default()
         });
     }
+    if r.operation == "backup-create" {
+        let report = backup::create(&r.input, &r.output, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["This backup covers only regular files and empty directories under the selected root; it omits ownership, permissions, timestamps, ACLs, extended attributes, hard-link relationships and symbolic links. SHA-256 values detect content changes relative to the embedded manifest but do not authenticate the backup or protect against an attacker who can replace both data and manifest. This is not a system image or disaster-recovery guarantee.".into()],
+            ..Outcome::default()
+        });
+    }
+    if r.operation == "backup-restore" {
+        let report = backup::restore(&r.input, &r.output, &j)?;
+        return Ok(Outcome {
+            preview: serde_json::to_string_pretty(&report)?,
+            written: Some(r.output),
+            warnings: vec!["Restored files are untrusted user data. The restore created a new directory and did not overwrite existing paths. Verify important files against a trusted independent source; the embedded manifest is not signed.".into()],
+            ..Outcome::default()
+        });
+    }
     let value = match r.operation.as_str() {
         "inspect" => inspect_report(&r.input, &j)?,
         "png-metadata" => png_metadata::process(&r.input, None, &j)?,
@@ -1233,6 +1255,7 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
         }
         "jpeg-metadata" => jpeg_metadata::process(&r.input, None, &j)?,
         "exif-metadata" => exif_metadata::inspect(&r.input, &j)?,
+        "backup-verify" => backup::verify(&r.input, &j)?,
         "jpeg-strip-metadata" => {
             let report = jpeg_metadata::process(&r.input, Some(&r.output), &j)?;
             return Ok(Outcome {
@@ -1484,6 +1507,9 @@ pub fn handle(r: Request, j: Job) -> Result<Outcome> {
                 .into()
         } else if r.operation == "exif-metadata" {
             "EXIF values may disclose GPS coordinates, device identifiers, timestamps or other sensitive information. The report is bounded and should be reviewed before sharing."
+                .into()
+        } else if r.operation == "backup-verify" {
+            "Verification checks file bytes against the SHA-256 values in the embedded manifest. The manifest is not signed or authenticated, so this cannot establish who created the archive."
                 .into()
         } else if r.operation == "hex-preview" {
             "The report contains raw file bytes. Review it before sharing.".into()
